@@ -69,20 +69,26 @@ TERMINAL_WIDTH=0
 # Check for installer payloads inside ZIP - check first N entries for installer patterns
 is_installer_zip() {
     local zip="$1"
-    local cap="$MAX_ZIP_ENTRIES"
+    local deadline="${2:-$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))}"
+    local listing duration rc=0
 
     [[ ${#ZIP_LIST_CMD[@]} -gt 0 ]] || return 1
-
-    if ! "${ZIP_LIST_CMD[@]}" "$zip" 2> /dev/null |
-        head -n "$cap" |
-        awk '
-            /\.(app|pkg|dmg|xip)(\/|$)/ { found=1; exit 0 }
-            END { exit found ? 0 : 1 }
-        '; then
-        return 1
+    duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_SHORT_QUERY_SEC" "$deadline") || return $?
+    listing=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
+    run_with_timeout "$duration" "${ZIP_LIST_CMD[@]}" "$zip" > "$listing" 2> /dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_SHORT_QUERY_SEC" "$deadline") || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            run_with_timeout "$duration" awk -v cap="$MAX_ZIP_ENTRIES" '
+                NR <= cap && /\.(app|pkg|dmg|xip)(\/|$)/ { found=1 }
+                END { exit found ? 0 : 1 }
+            ' "$listing" || rc=$?
+        fi
+    elif ! mole_rc_timeout_or_signal "$rc"; then
+        rc=1 # Corrupt or unreadable archives remain ordinary non-candidates.
     fi
-
-    return 0
+    rm -f "$listing" # SAFE: tracked mktemp file created by this archive inspection
+    return "$rc"
 }
 
 handle_candidate_file() {
@@ -95,9 +101,13 @@ handle_candidate_file() {
             ;;
         *.zip)
             [[ -r "$file" ]] || return 0
-            if is_installer_zip "$file" 2> /dev/null; then
-                printf '%s\0' "$file"
-            fi
+            local zip_rc=0
+            is_installer_zip "$file" "${2:-}" 2> /dev/null || zip_rc=$?
+            case "$zip_rc" in
+                0) printf '%s\0' "$file" ;;
+                1) return 0 ;;
+                *) return "$zip_rc" ;;
+            esac
             ;;
     esac
 }

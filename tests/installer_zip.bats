@@ -370,3 +370,34 @@ EOF
     [[ "$output" == *"valid-installer.zip"* ]] || return 1
     [[ "$output" != *"corrupt.zip"* ]]
 }
+
+@test "ZIP inspection consumes a complete large listing without losing an early match" {
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command zipinfo 'printf "Installer.app/\n"; i=0; while [[ $i -lt 12000 ]]; do printf "ordinary-file-%s.txt\n" "$i"; i=$((i + 1)); done'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        is_installer_zip "$HOME/Downloads/large.zip"
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "stalled ZIP inspection discards all discovered installers and preserves timeout" {
+    touch "$HOME/Downloads/first.dmg" "$HOME/Downloads/stalled.zip"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/first.dmg" "$HOME/Downloads/stalled.zip"'
+    mole_test_fake_command zipinfo 'printf "Installer.app/\n"; exec sleep 30'
+    # shellcheck disable=SC2016 # The child shell evaluates this script.
+    run env MOLE_TIMEOUT_SHORT_QUERY_SEC=2 /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_all_installers() { scan_installers_in_path "$HOME/Downloads" "$1"; }
+        rc=0
+        collect_installers || rc=$?
+        mole_rc_timeout "$rc" || exit 1
+        [[ ${#INSTALLER_PATHS[@]} -eq 0 ]] || exit 1
+        [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/stalled.zip" ]] || exit 1
+        [[ $SECONDS -lt 6 ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
+}
