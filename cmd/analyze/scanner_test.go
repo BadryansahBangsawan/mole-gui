@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -31,7 +33,7 @@ func TestGetDirectoryLogicalSizeWithExclude(t *testing.T) {
 	writeFileWithSize(t, libFile, 200)
 	writeFileWithSize(t, projectLibFile, 300)
 
-	total, err := getDirectoryLogicalSizeWithExclude(base, "")
+	total, err := getDirectoryLogicalSizeWithExclude(context.Background(), base, "", nil)
 	if err != nil {
 		t.Fatalf("getDirectoryLogicalSizeWithExclude (no exclude) error: %v", err)
 	}
@@ -39,7 +41,7 @@ func TestGetDirectoryLogicalSizeWithExclude(t *testing.T) {
 		t.Fatalf("expected total 600 bytes, got %d", total)
 	}
 
-	excluding, err := getDirectoryLogicalSizeWithExclude(base, filepath.Join(base, "Library"))
+	excluding, err := getDirectoryLogicalSizeWithExclude(context.Background(), base, filepath.Join(base, "Library"), nil)
 	if err != nil {
 		t.Fatalf("getDirectoryLogicalSizeWithExclude (exclude Library) error: %v", err)
 	}
@@ -60,7 +62,7 @@ func TestGetDirectorySizeFromDuSkippingImmediateChildDoesNotMeasureExcludedPath(
 	}
 
 	var measured []string
-	size, err := getDirectorySizeFromDuSkippingImmediateChild(base, excluded, func(path string) (int64, error) {
+	size, err := getDirectorySizeFromDuSkippingImmediateChild(context.Background(), base, excluded, func(path string) (int64, error) {
 		measured = append(measured, path)
 		return 100, nil
 	})
@@ -133,5 +135,147 @@ func BenchmarkGetDirectorySizeFromDuWithExcludeHomeLibrary(b *testing.B) {
 		if size <= 0 {
 			b.Fatalf("expected non-zero size, got %d", size)
 		}
+	}
+}
+
+// A readable root must not turn an unreadable descendant into a measured zero.
+func TestScanUnreadableDescendantPreservesCoverageAndGoodCache(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission fixture requires an unprivileged user")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "root")
+	child := filepath.Join(root, "child")
+	locked := filepath.Join(child, "locked")
+	writeFileWithSize(t, filepath.Join(child, "readable"), 4096)
+	writeFileWithSize(t, filepath.Join(locked, "hidden"), 1<<20)
+	scan := func(scanRoot string) scanResult {
+		t.Helper()
+		var files, dirs, bytes int64
+		current := &atomic.Value{}
+		current.Store("")
+		result, err := scanPathConcurrentWithLimiter(context.Background(), scanRoot, &files, &dirs, &bytes, current, false, 0, nil, scanCacheBypass, newScanPublication(context.Background(), nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	good := scan(root)
+	if good.State != scanComplete {
+		t.Fatalf("initial scan state = %s", good.State)
+	}
+	if err := saveCacheToDisk(root, good); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCacheToDisk(child, scan(child)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	partial := scan(root)
+	if partial.State != scanPartial || partial.TotalSize != 4096 || partial.TotalFiles != 1 {
+		t.Fatalf("partial result lost coverage or readable bytes: %+v", partial)
+	}
+	if len(partial.Entries) != 1 || partial.Entries[0].State != scanPartial {
+		t.Fatalf("child coverage not propagated: %+v", partial.Entries)
+	}
+	if partial.transientFailure {
+		t.Fatal("a chmod 000 denial was classified as transient")
+	}
+	transient := partial
+	transient.transientFailure = true
+	if err := saveCacheToDisk(root, transient); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := loadCacheFromDisk(root)
+	if err != nil || cached.TotalSize != good.TotalSize {
+		t.Fatalf("transient partial scan replaced good cache: %+v, %v", cached, err)
+	}
+	// A denial-only partial is the current answer and replaces stale caches.
+	if childCache, err := loadCacheFromDisk(child); err == nil && childCache.State == scanComplete {
+		t.Fatalf("stale complete child cache survived a denial-only rescan: %+v", childCache)
+	}
+	if err := saveCacheToDisk(root, partial); err != nil {
+		t.Fatal(err)
+	}
+	cached, err = loadCacheFromDisk(root)
+	if err != nil || cached.State != scanPartial || cached.TotalSize != partial.TotalSize {
+		t.Fatalf("denial-only partial was not cached as partial: %+v, %v", cached, err)
+	}
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recovered := scan(root)
+	if recovered.State != scanComplete || recovered.TotalSize != good.TotalSize {
+		t.Fatalf("recovery: %+v", recovered)
+	}
+}
+
+func TestFoldedDirectoryRetainsPartialDuOutput(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "root")
+	folded := filepath.Join(root, "node_modules")
+	writeFileWithSize(t, filepath.Join(folded, "file"), 1)
+	stubDir := t.TempDir()
+	// The real external-command boundary returns a subtotal and fails.
+	if err := os.WriteFile(filepath.Join(stubDir, "du"), []byte("#!/bin/sh\nprintf '8\tpartial\n'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+	size, err := getDirectorySizeFromDu(context.Background(), folded)
+	if size != 8192 || err == nil {
+		t.Fatalf("du lost partial bytes or failure: %d, %v", size, err)
+	}
+	var files, dirs, bytes int64
+	current := &atomic.Value{}
+	current.Store("")
+	result, err := scanPathConcurrentWithOptions(context.Background(), root, &files, &dirs, &bytes, current, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != scanPartial || result.TotalSize != 8192 || len(result.Entries) != 1 || result.Entries[0].State != scanPartial {
+		t.Fatalf("partial du result was lost or replaced by fallback walk: %+v", result)
+	}
+}
+
+func TestOverviewMeasurementStoresDenialOnlyPartial(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission fixture requires an unprivileged user")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "root")
+	locked := filepath.Join(root, "locked")
+	writeFileWithSize(t, filepath.Join(root, "readable"), 4096)
+	writeFileWithSize(t, filepath.Join(locked, "hidden"), 1<<20)
+	good, err := measureOverviewSize(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	partial, err := measureOverviewSize(context.Background(), root)
+	if err == nil || partial < 4096 || partial >= good {
+		t.Fatalf("overview must retain partial bytes and error: good=%d partial=%d err=%v", good, partial, err)
+	}
+	cached, state, err := loadStoredOverviewMeasurement(root)
+	if err != nil || cached != partial || state != scanPartial {
+		t.Fatalf("denial-only measurement was not stored as partial: %d, %s, %v", cached, state, err)
+	}
+	logical, err := getDirectoryLogicalSizeWithExclude(context.Background(), root, "", nil)
+	if err == nil || logical != 4096 {
+		t.Fatalf("fallback erased failure: %d, %v", logical, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = measureOverviewSize(ctx, root)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation lost: %v", err)
 	}
 }

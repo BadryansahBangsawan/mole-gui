@@ -26,10 +26,14 @@ import (
 // stale on-disk cache entries are rejected instead of silently reused.
 // v2: analyze deduplicates hardlinked files to match `du`.
 // v3: ordinary Parallels VM storage is included instead of skipped by name.
-const cacheSchemaVersion = 3
+// v4: incomplete scans are no longer authoritative directory measurements.
+// v5: entries record their scan state, so a partial result lost only to
+// permission denials can be cached and still reads as partial.
+const cacheSchemaVersion = 5
 
 type overviewSizeSnapshot struct {
 	Size          int64     `json:"size"`
+	Partial       bool      `json:"partial,omitempty"`
 	Updated       time.Time `json:"updated"`
 	SchemaVersion int       `json:"schema_version"`
 }
@@ -43,6 +47,7 @@ var (
 func snapshotFromModel(m model) historyEntry {
 	return historyEntry{
 		Path:          m.path,
+		State:         m.scanState,
 		Entries:       slices.Clone(m.entries),
 		LargeFiles:    slices.Clone(m.largeFiles),
 		TotalSize:     m.totalSize,
@@ -51,7 +56,7 @@ func snapshotFromModel(m model) historyEntry {
 		EntryOffset:   m.offset,
 		LargeSelected: m.largeSelected,
 		LargeOffset:   m.largeOffset,
-		NeedsRefresh:  m.viewNeedsRefresh || m.scanning,
+		NeedsRefresh:  m.viewNeedsRefresh || m.scanning || (m.scanState != scanComplete && m.scanTransient),
 		IsOverview:    m.isOverview,
 	}
 }
@@ -59,7 +64,7 @@ func snapshotFromModel(m model) historyEntry {
 func filterNonEmptyEntries(entries []dirEntry) []dirEntry {
 	filtered := make([]dirEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Size > 0 {
+		if entry.Size > 0 || entry.State != scanComplete {
 			filtered = append(filtered, entry)
 		}
 	}
@@ -69,6 +74,7 @@ func filterNonEmptyEntries(entries []dirEntry) []dirEntry {
 func historyEntryFromScanResult(path string, result scanResult, previous historyEntry, needsRefresh bool) historyEntry {
 	entry := historyEntry{
 		Path:          path,
+		State:         result.State,
 		Entries:       slices.Clone(result.Entries),
 		LargeFiles:    slices.Clone(result.LargeFiles),
 		TotalSize:     result.TotalSize,
@@ -77,7 +83,7 @@ func historyEntryFromScanResult(path string, result scanResult, previous history
 		EntryOffset:   previous.EntryOffset,
 		LargeSelected: previous.LargeSelected,
 		LargeOffset:   previous.LargeOffset,
-		NeedsRefresh:  needsRefresh,
+		NeedsRefresh:  needsRefresh || !result.persistable(),
 		IsOverview:    previous.IsOverview,
 	}
 	return entry
@@ -136,27 +142,41 @@ func getOverviewSizeStorePath() (string, error) {
 }
 
 func loadStoredOverviewSize(path string) (int64, error) {
+	size, _, err := loadStoredOverviewMeasurement(path)
+	return size, err
+}
+
+func loadStoredOverviewMeasurement(path string) (int64, scanState, error) {
 	if path == "" {
-		return 0, fmt.Errorf("empty path")
+		return 0, scanComplete, fmt.Errorf("empty path")
 	}
 	overviewSnapshotMu.Lock()
 	defer overviewSnapshotMu.Unlock()
 	if err := ensureOverviewSnapshotCacheLocked(); err != nil {
-		return 0, err
+		return 0, scanComplete, err
 	}
 	if overviewSnapshotCache == nil {
-		return 0, fmt.Errorf("snapshot cache unavailable")
+		return 0, scanComplete, fmt.Errorf("snapshot cache unavailable")
 	}
 	if snapshot, ok := overviewSnapshotCache[path]; ok && snapshot.Size > 0 {
 		if time.Since(snapshot.Updated) < overviewCacheTTL {
-			return snapshot.Size, nil
+			if snapshot.Partial {
+				return snapshot.Size, scanPartial, nil
+			}
+			return snapshot.Size, scanComplete, nil
 		}
-		return 0, fmt.Errorf("snapshot expired")
+		return 0, scanComplete, fmt.Errorf("snapshot expired")
 	}
-	return 0, fmt.Errorf("snapshot not found")
+	return 0, scanComplete, fmt.Errorf("snapshot not found")
 }
 
 func storeOverviewSize(path string, size int64) error {
+	return storeOverviewMeasurement(path, size, false)
+}
+
+// storeOverviewMeasurement records a size; partial marks one that is missing
+// only folders the terminal is not allowed to read.
+func storeOverviewMeasurement(path string, size int64, partial bool) error {
 	if path == "" || size <= 0 {
 		return fmt.Errorf("invalid overview size")
 	}
@@ -172,12 +192,13 @@ func storeOverviewSize(path string, size int64) error {
 	// every save re-serializes and rewrites the entire store. Skip the write
 	// while the recorded value still stands; the timestamp is only refreshed
 	// often enough to keep a live entry from aging out.
-	if existing, ok := overviewSnapshotCache[path]; ok && existing.Size == size &&
+	if existing, ok := overviewSnapshotCache[path]; ok && existing.Size == size && existing.Partial == partial &&
 		time.Since(existing.Updated) < overviewCacheTTL/overviewRefreshDivisor {
 		return nil
 	}
 	overviewSnapshotCache[path] = overviewSizeSnapshot{
 		Size:          size,
+		Partial:       partial,
 		Updated:       time.Now(),
 		SchemaVersion: cacheSchemaVersion,
 	}
@@ -248,19 +269,19 @@ func persistOverviewSnapshotLocked() error {
 	return nil
 }
 
-func loadOverviewCachedSize(path string) (int64, error) {
+func loadOverviewCachedMeasurement(path string) (int64, scanState, error) {
 	if path == "" {
-		return 0, fmt.Errorf("empty path")
+		return 0, scanComplete, fmt.Errorf("empty path")
 	}
-	if snapshot, err := loadStoredOverviewSize(path); err == nil {
-		return snapshot, nil
+	if snapshot, state, err := loadStoredOverviewMeasurement(path); err == nil {
+		return snapshot, state, nil
 	}
 	cacheEntry, err := loadCacheFromDisk(path)
 	if err != nil {
-		return 0, err
+		return 0, scanComplete, err
 	}
-	_ = storeOverviewSize(path, cacheEntry.TotalSize)
-	return cacheEntry.TotalSize, nil
+	_ = storeOverviewMeasurement(path, cacheEntry.TotalSize, cacheEntry.State != scanComplete)
+	return cacheEntry.TotalSize, cacheEntry.State, nil
 }
 
 // moleCacheRoot is the single definition of the shared cache location; both
@@ -649,6 +670,9 @@ func saveCacheToDisk(path string, result scanResult) error {
 }
 
 func saveCacheToDiskWithOptions(publication *scanPublication, path string, result scanResult, needsRefresh bool) error {
+	if !result.persistable() {
+		return nil
+	}
 	if err := publication.ctx.Err(); err != nil {
 		return err
 	}
@@ -663,6 +687,7 @@ func saveCacheToDiskWithOptions(publication *scanPublication, path string, resul
 	}
 
 	entry := cacheEntry{
+		State:         result.State,
 		Entries:       result.Entries,
 		LargeFiles:    result.LargeFiles,
 		TotalSize:     result.TotalSize,
@@ -810,9 +835,9 @@ func prefetchOverviewCache(ctx context.Context) {
 				return
 			}
 
-			size, err := measureOverviewSize(path)
-			if err == nil && size > 0 {
-				_ = storeOverviewSize(path, size)
+			size, err := measureOverviewSize(ctx, path)
+			if overviewMeasurementStorable(size, err) {
+				_ = storeOverviewMeasurement(path, size, err != nil)
 			}
 		})
 	}
