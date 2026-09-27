@@ -105,30 +105,41 @@ handle_candidate_file() {
 scan_installers_in_path() {
     local path="$1"
     local max_depth="${MOLE_INSTALLER_SCAN_MAX_DEPTH:-$INSTALLER_SCAN_MAX_DEPTH_DEFAULT}"
+    local deadline="${2:-$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))}"
 
     [[ -d "$path" ]] || return 0
 
     # A failed producer must never publish its partial candidate prefix.
-    local scan_file filtered_file file scan_rc=0
+    local scan_file filtered_file file scan_timeout scan_rc=0
     scan_file=$(create_temp_file) || return 1
     filtered_file=$(create_temp_file) || return 1
-    if command -v fd > /dev/null 2>&1; then
-        fd --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
-            -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
-            . "$path" > "$scan_file" 2> /dev/null || scan_rc=$?
-    else
-        find "$path" -maxdepth "$max_depth" -type f \
-            \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
-            -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0 \
-            > "$scan_file" 2> /dev/null || scan_rc=$?
+    scan_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline") || scan_rc=$?
+    if [[ $scan_rc -eq 0 ]]; then
+        if command -v fd > /dev/null 2>&1; then
+            run_with_timeout "$scan_timeout" fd --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
+                -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
+                . "$path" > "$scan_file" 2> /dev/null || scan_rc=$?
+        else
+            run_with_timeout "$scan_timeout" find "$path" -maxdepth "$max_depth" -type f \
+                \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
+                -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0 \
+                > "$scan_file" 2> /dev/null || scan_rc=$?
+        fi
     fi
     if [[ $scan_rc -eq 0 ]]; then
         while IFS= read -r -d '' file; do
-            handle_candidate_file "$file" >> "$filtered_file" || {
+            _mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline" > /dev/null || {
+                scan_rc=$?
+                break
+            }
+            handle_candidate_file "$file" "$deadline" >> "$filtered_file" || {
                 scan_rc=$?
                 break
             }
         done < "$scan_file"
+    fi
+    if [[ $scan_rc -eq 0 ]]; then
+        _mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline" > /dev/null || scan_rc=$?
     fi
     if [[ $scan_rc -eq 0 ]]; then
         cat "$filtered_file" || scan_rc=$?
@@ -141,8 +152,10 @@ scan_installers_in_path() {
 }
 
 scan_all_installers() {
+    local deadline="${1:-$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))}"
+    local path
     for path in "${INSTALLER_SCAN_PATHS[@]}"; do
-        scan_installers_in_path "$path" || return $?
+        scan_installers_in_path "$path" "$deadline" || return $?
     done
 }
 
@@ -256,12 +269,16 @@ collect_installers() {
     # Scan all paths, deduplicate, and sort results
     local -a all_files=()
 
-    local scan_file sorted_file file scan_rc=0
+    local deadline=$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))
+    local scan_file sorted_file file scan_timeout scan_rc=0
     scan_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
     sorted_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
-    scan_all_installers > "$scan_file" || scan_rc=$?
+    scan_all_installers "$deadline" > "$scan_file" || scan_rc=$?
     if [[ $scan_rc -eq 0 ]]; then
-        sort -zu "$scan_file" > "$sorted_file" || scan_rc=$?
+        scan_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline") || scan_rc=$?
+        if [[ $scan_rc -eq 0 ]]; then
+            run_with_timeout "$scan_timeout" sort -zu "$scan_file" > "$sorted_file" || scan_rc=$?
+        fi
     fi
     if [[ $scan_rc -ne 0 ]]; then
         rm -f "$scan_file" "$sorted_file" # SAFE: tracked mktemp files created by this collection

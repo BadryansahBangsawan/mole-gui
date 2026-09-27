@@ -316,3 +316,39 @@ require_fd() {
     ' bash "$PROJECT_ROOT/bin/installer.sh"
     [ "$status" -eq 0 ]
 }
+
+@test "installer discovery times out a stalled producer without publishing its prefix" {
+    touch "$HOME/Downloads/incomplete.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/incomplete.dmg"; exec sleep 30'
+    # shellcheck disable=SC2016 # The child shell evaluates this script.
+    run env MOLE_TIMEOUT_DISK_VERIFY_SEC=2 /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        rc=0
+        scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+        mole_rc_timeout "$rc" || exit 1
+        [[ ! -s "$2" ]] || exit 1
+        [[ -f "$HOME/Downloads/incomplete.dmg" ]] || exit 1
+        [[ $SECONDS -lt 6 ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
+    [ "$status" -eq 0 ]
+}
+
+@test "expired installer scan budget does not start another directory producer" {
+    export INSTALLER_TRACE="$BATS_TEST_TMPDIR/producer-started"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'touch "$INSTALLER_TRACE"; exit 0'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_installers_in_path "$HOME/Downloads"
+        [[ -f "$INSTALLER_TRACE" ]] || exit 1
+        /bin/rm -f "$INSTALLER_TRACE"
+        rc=0
+        scan_installers_in_path "$HOME/Downloads" "$SECONDS" || rc=$?
+        mole_rc_timeout "$rc" || exit 1
+        [[ ! -e "$INSTALLER_TRACE" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
+}
