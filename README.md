@@ -378,7 +378,7 @@ When custom paths are configured, Mole scans only those directories. Otherwise, 
 
 ### Installer
 
-`mo installer` finds DMG, PKG, MPKG, ISO, XIP, and installer ZIP files in Downloads, Desktop, Homebrew caches, iCloud, Mail, Telegram, and other supported locations. Each item shows its size and source before removal. Use `mo installer --dry-run` to preview the plan.
+`mo installer` finds DMG, PKG, MPKG, ISO, XIP, and installer ZIP files in Downloads, Desktop, Homebrew caches, iCloud, Mail, Telegram, and other supported locations. Each item shows its size and source before removal. Use `mo installer --dry-run` to preview the plan. Discovery has a cumulative time limit. If a scan or metadata probe fails or times out, Mole discards the list and exits without selecting files; corrupt and unreadable ZIP archives are skipped.
 
 <details>
 <summary><strong>Installer example output</strong></summary>

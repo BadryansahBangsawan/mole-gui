@@ -66,7 +66,9 @@ fi
 
 TERMINAL_WIDTH=0
 
-# Check for installer payloads inside ZIP - check first N entries for installer patterns
+# Inspect the first N entries only after a complete ZIP listing.
+# Return 0 for an installer, 1 for an ordinary/unreadable/corrupt ZIP;
+# resource failures and timeout/signal statuses abort discovery.
 is_installer_zip() {
     local zip="$1"
     local deadline="${2:-$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))}"
@@ -112,6 +114,7 @@ handle_candidate_file() {
     esac
 }
 
+# Publish NUL-delimited candidates only on success; preserve producer failures.
 scan_installers_in_path() {
     local path="$1"
     local max_depth="${MOLE_INSTALLER_SCAN_MAX_DEPTH:-$INSTALLER_SCAN_MAX_DEPTH_DEFAULT}"
@@ -218,19 +221,23 @@ get_terminal_width() {
     echo "$TERMINAL_WIDTH"
 }
 
+# Escape terminal controls without changing the filesystem path.
+installer_display_text() {
+    local text="$1"
+    if [[ "$text" =~ [[:cntrl:]] ]]; then
+        printf -v text '%q' "$text"
+    fi
+    printf '%s' "$text"
+}
+
 # Format installer display with alignment - similar to purge command
 format_installer_display() {
     local filename="$1"
     local size_str="$2"
     local source="$3"
 
-    # Keep filenames literal in the plan, but prevent terminal control output.
-    if [[ "$filename" =~ [[:cntrl:]] ]]; then
-        printf -v filename '%q' "$filename"
-    fi
-    if [[ "$source" =~ [[:cntrl:]] ]]; then
-        printf -v source '%q' "$source"
-    fi
+    filename=$(installer_display_text "$filename")
+    source=$(installer_display_text "$source")
 
     # Terminal width for alignment
     local terminal_width
@@ -265,7 +272,8 @@ format_installer_display() {
     printf "%-*s %8s | %-10s" "$printf_width" "$truncated_name" "$size_str" "$source"
 }
 
-# Collect all installers with their metadata
+# Publish complete installer metadata: 0 success, 1 empty, 4 scan failure,
+# or the original timeout/signal status. No failure publishes partial arrays.
 collect_installers() {
     # Clear previous results
     INSTALLER_PATHS=()
@@ -273,6 +281,14 @@ collect_installers() {
     INSTALLER_SOURCES=()
     DISPLAY_NAMES=()
     INSTALLER_SCAN_FAILURE_PATH=""
+
+    # Scan all paths, deduplicate, and sort results
+    local -a all_files=() sizes=() sources=() displays=()
+
+    local deadline=$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))
+    local scan_file sorted_file file scan_timeout scan_rc=0
+    scan_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
+    sorted_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
 
     # Start scanning with spinner
     if [[ -t 1 ]]; then
@@ -282,13 +298,6 @@ collect_installers() {
     # Start debug session
     debug_operation_start "Collect Installers" "Scanning for redundant installer files"
 
-    # Scan all paths, deduplicate, and sort results
-    local -a all_files=() sizes=() sources=() displays=()
-
-    local deadline=$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))
-    local scan_file sorted_file file scan_timeout scan_rc=0
-    scan_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
-    sorted_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
     scan_all_installers "$deadline" > "$scan_file" || scan_rc=$?
     if [[ $scan_rc -eq 0 ]]; then
         scan_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline") || scan_rc=$?
@@ -772,7 +781,8 @@ delete_selected_installers() {
         local file_size="${INSTALLER_DELETE_SIZES[$plan_index]}"
         local size_human
         size_human=$(bytes_to_human "$file_size")
-        echo -e "  ${GREEN}${ICON_SUCCESS}${NC} $(basename "$file_path") ${GRAY}, ${size_human}${NC}"
+        printf '  %s%s%s %s %s, %s%s\n' "$GREEN" "$ICON_SUCCESS" "$NC" \
+            "$(installer_display_text "${file_path##*/}")" "$GRAY" "$size_human" "$NC"
     done
 
     # Confirm deletion
@@ -827,11 +837,17 @@ perform_installers() {
         fi
         printf '\n'
         if [[ $collect_status -ne 1 ]]; then
-            printf '%sInstaller scan incomplete%s; no files selected' "$YELLOW" "$NC" >&2
-            if [[ -n "$INSTALLER_SCAN_FAILURE_PATH" ]]; then
-                printf ' (%s)' "$INSTALLER_SCAN_FAILURE_PATH" >&2
+            local scan_reason="incomplete"
+            if mole_rc_timeout "$collect_status"; then
+                scan_reason="timed out"
+            elif mole_rc_timeout_or_signal "$collect_status"; then
+                scan_reason="interrupted"
             fi
-            printf '\n' >&2
+            printf '%sInstaller scan %s%s; no files selected' "$YELLOW" "$scan_reason" "$NC" >&2
+            if [[ -n "$INSTALLER_SCAN_FAILURE_PATH" ]]; then
+                printf ' (%s)' "$(installer_display_text "$INSTALLER_SCAN_FAILURE_PATH")" >&2
+            fi
+            printf '\nCheck that the scan locations are readable and responsive, then retry mo installer.\n' >&2
             return "$collect_status"
         fi
         echo -e "${GREEN}${ICON_SUCCESS}${NC} Great! No installer files to clean"
@@ -904,7 +920,10 @@ show_summary() {
 
         local failure_index
         for ((failure_index = 0; failure_index < failure_limit; failure_index++)); do
-            local failure_detail="${INSTALLER_DELETE_FAILURES[$failure_index]}"
+            local failure_detail
+            failure_detail=$(installer_display_text "${INSTALLER_DELETE_FAILURES[$failure_index]}")
+            # The shared summary renderer interprets escapes for colors.
+            failure_detail=${failure_detail//\\/\\\\}
             summary_details+=("${ICON_WARNING} $failure_detail")
         done
 

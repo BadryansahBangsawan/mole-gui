@@ -403,3 +403,25 @@ EOF
     ' bash "$PROJECT_ROOT/bin/installer.sh"
     [ "$status" -eq 0 ]
 }
+
+@test "ZIP inspections share one cumulative budget across candidates" {
+    touch "$HOME/Downloads/first.zip" "$HOME/Downloads/second.zip" "$HOME/Downloads/third.zip"
+    export INSTALLER_TRACE="$BATS_TEST_TMPDIR/archive-trace"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/first.zip" "$HOME/Downloads/second.zip" "$HOME/Downloads/third.zip"'
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command zipinfo 'printf "%s\n" "$2" >> "$INSTALLER_TRACE"; sleep 2; printf "Installer.app/\n"'
+    # shellcheck disable=SC2016 # The child shell evaluates this script.
+    run env MOLE_TIMEOUT_DISK_VERIFY_SEC=4 MOLE_TIMEOUT_SHORT_QUERY_SEC=5 /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        rc=0
+        scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+        mole_rc_timeout "$rc" || exit 1
+        [[ ! -s "$2" && $SECONDS -lt 6 ]] || exit 1
+        grep -q first.zip "$INSTALLER_TRACE" || exit 1
+        grep -q second.zip "$INSTALLER_TRACE" || exit 1
+        ! grep -q third.zip "$INSTALLER_TRACE" || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
+    [ "$status" -eq 0 ]
+}

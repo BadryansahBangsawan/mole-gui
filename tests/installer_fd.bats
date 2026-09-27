@@ -42,21 +42,31 @@ require_fd() {
     [[ "${FD_AVAILABLE:-0}" -eq 1 ]]
 }
 
-@test "installer discovery discards fd output when the producer fails" {
+@test "installer discovery discards fd and find output when the producer fails" {
     touch "$HOME/Downloads/incomplete.dmg"
     # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
     mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/incomplete.dmg"; exit 74'
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command find 'printf "%s\0" "$HOME/Downloads/incomplete.dmg"; exit 74'
 
-    run /bin/bash --noprofile --norc -c '
-        export MOLE_TEST_MODE=1
-        source "$1"
-        rc=0
-        scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
-        [[ $rc -eq 74 ]] || exit 1
-        [[ ! -s "$2" ]] || exit 1
-        [[ -f "$HOME/Downloads/incomplete.dmg" ]] || exit 1
-    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
-    [ "$status" -eq 0 ]
+    local backend
+    for backend in fd find; do
+        run /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            backend="$3"
+            command() {
+                if [[ "$backend" == find && "${1:-}" == -v && "${2:-}" == fd ]]; then return 1; fi
+                builtin command "$@"
+            }
+            rc=0
+            scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+            [[ $rc -eq 74 ]] || exit 1
+            [[ ! -s "$2" ]] || exit 1
+            [[ -f "$HOME/Downloads/incomplete.dmg" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output" "$backend"
+        [ "$status" -eq 0 ] || return 1
+    done
 }
 
 @test "failed installer discovery never reaches selection or reports an empty scan" {
@@ -371,21 +381,75 @@ require_fd() {
     [ "$status" -eq 0 ]
 }
 
-@test "interrupted installer size recheck stops before later deletions" {
+@test "installer interruption stops before later deletions" {
     touch "$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg"
+    local boundary
+    for boundary in size delete; do
+        run /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            INSTALLER_PATHS=("$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg")
+            INSTALLER_SIZES=(0 0)
+            build_installer_delete_plan 0 1
+            interruption_trace="$3"
+            case "$2" in
+                size) installer_file_size_bytes() {
+                    [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return 130
+                    printf "%s\n" "$1" >> "$interruption_trace"
+                    get_file_size "$1"
+                } ;;
+                delete) mole_delete() {
+                    [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return 130
+                    printf "%s\n" "$1" >> "$interruption_trace"
+                    return 0
+                } ;;
+            esac
+            rc=0
+            execute_installer_delete_plan || rc=$?
+            [[ $rc -eq 130 && $total_delete_failed -eq 1 ]] || exit 1
+            [[ ! -e "$interruption_trace" ]] || exit 1
+            [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/second.dmg" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$boundary" "$BATS_TEST_TMPDIR/$boundary-trace"
+        [ "$status" -eq 0 ] || return 1
+    done
+}
+
+@test "installer confirmation and failure summary render filenames literally" {
+    local fixture="$HOME/Downloads/real"$'\e'"[2Jspoof\\n.dmg"
+    touch "$fixture"
+    # shellcheck disable=SC2016 # The child shell evaluates this script.
     run /bin/bash --noprofile --norc -c '
         export MOLE_TEST_MODE=1
         source "$1"
-        INSTALLER_PATHS=("$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg")
-        INSTALLER_SIZES=(0 0)
-        build_installer_delete_plan 0 1
-        installer_file_size_bytes() { return 130; }
+        INSTALLER_PATHS=("$2")
+        INSTALLER_SIZES=(0)
+        MOLE_SELECTION_RESULT=0
         rc=0
-        execute_installer_delete_plan || rc=$?
-        [[ $rc -eq 130 && $total_delete_failed -eq 1 ]] || exit 1
-        [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/second.dmg" ]] || exit 1
-    ' bash "$PROJECT_ROOT/bin/installer.sh"
+        delete_selected_installers <<< q > "$3" || rc=$?
+        [[ $rc -eq 1 && -f "$2" ]] || exit 1
+        record_installer_delete_failure "$2" "delete failed"
+        show_summary >> "$3"
+        output=$(cat "$3")
+        [[ "$output" != *$'"'"'\e'"'"'"[2Jspoof"* ]] || exit 1
+        [[ "$output" == *"spoof"* && "$output" == *"\\\\n.dmg"* ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$fixture" "$BATS_TEST_TMPDIR/rendered-output"
     [ "$status" -eq 0 ]
+}
+
+@test "installer command preserves producer cancellation and never opens selection" {
+    mole_test_fake_command fd 'kill -TERM "$$"'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_all_installers() { scan_installers_in_path "$HOME/Downloads" "$1"; }
+        show_installer_menu() { echo SELECTED; return 0; }
+        rc=0
+        main || rc=$?
+        printf "RC=%s COUNT=%s\n" "$rc" "${#INSTALLER_PATHS[@]}"
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"RC=143 COUNT=0"* && "$output" == *"Installer scan interrupted"* ]] || return 1
+    [[ "$output" != *"SELECTED"* ]]
 }
 
 @test "fd filesystem diagnostics reject a successful but incomplete traversal" {
