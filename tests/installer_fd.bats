@@ -503,3 +503,31 @@ require_fd() {
         [[ "$output" == *"[TIMEOUT]"* ]] || return 1
     done
 }
+
+@test "installer backends follow the scan root but never descendant symlinks" {
+    local fixture_root="$BATS_TEST_TMPDIR/scan-roots"
+    mkdir -p "$fixture_root/real" "$fixture_root/outside"
+    touch "$fixture_root/real/expected.dmg" "$fixture_root/outside/excluded.dmg"
+    ln -s "$fixture_root/real" "$fixture_root/linked-root"
+    ln -s "$fixture_root/outside" "$fixture_root/real/linked-child"
+    ln -s "$fixture_root/outside/excluded.dmg" "$fixture_root/real/linked-file.dmg"
+    local backend
+    for backend in fd find; do
+        # shellcheck disable=SC2016 # The child shell evaluates this script.
+        run /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            backend="$2"
+            command() {
+                if [[ "$backend" == find && "${1:-}" == -v && "${2:-}" == fd ]]; then return 1; fi
+                builtin command "$@"
+            }
+            root="$3"
+            scan_all_installers() { scan_installers_in_path "$root" "$1"; }
+            collect_installers
+            [[ ${#INSTALLER_PATHS[@]} -eq 1 ]] || exit 1
+            [[ "${INSTALLER_PATHS[0]}" == "$root/expected.dmg" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$backend" "$fixture_root/linked-root"
+        [ "$status" -eq 0 ] || return 1
+    done
+}
