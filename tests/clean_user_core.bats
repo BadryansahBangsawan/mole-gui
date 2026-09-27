@@ -2537,6 +2537,58 @@ EOF
     }
 }
 
+@test "large files reviews Android, Hugging Face, mise, and Gradle payloads without deleting" {
+    local review_home="$HOME/large-review-payloads"
+    mkdir -p \
+        "$review_home/.android/avd/Pixel_8a.avd" \
+        "$review_home/Library/Android/sdk/system-images/android-35" \
+        "$review_home/.cache/huggingface/hub" \
+        "$review_home/.local/share/mise/installs/node/22.1.0" \
+        "$review_home/.gradle/caches/modules-2"
+    ln -s "$review_home/.local/share/mise/installs/node" "$review_home/.local/share/mise/installs/nodejs"
+
+    run env -u ANDROID_AVD_HOME -u ANDROID_HOME -u ANDROID_SDK_ROOT -u HF_HOME -u MISE_DATA_DIR \
+        HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+check_large_file_candidates
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Android emulators"* ]] &&
+        [[ "$output" == *"Android system images"* ]] &&
+        [[ "$output" == *"Hugging Face cache"* ]] &&
+        [[ "$output" == *"mise node installs"* ]] &&
+        [[ "$output" == *"Gradle caches"* ]] || {
+        echo "$output"
+        return 1
+    }
+    # A symlinked tool alias must not double-report the same payload.
+    [[ "$output" != *"mise nodejs installs"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [ -d "$review_home/.android/avd/Pixel_8a.avd" ] &&
+        [ -d "$review_home/Library/Android/sdk/system-images/android-35" ] &&
+        [ -d "$review_home/.cache/huggingface/hub" ] &&
+        [ -d "$review_home/.local/share/mise/installs/node/22.1.0" ] &&
+        [ -d "$review_home/.gradle/caches/modules-2" ]
+}
+
 @test "large files dates the irreplaceable rows and leaves caches undated" {
     local review_home="$HOME/large-review-dates"
     mkdir -p \

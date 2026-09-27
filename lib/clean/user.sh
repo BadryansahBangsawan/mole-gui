@@ -2841,6 +2841,35 @@ check_large_file_candidates() {
     _report_large_or_stop "pnpm store" "$HOME/Library/pnpm/store" || return $?
     _report_large_or_stop "Conda packages" "$HOME/.conda/pkgs" || return $?
     _report_large_or_stop "Anaconda packages" "$HOME/anaconda3/pkgs" || return $?
+    # ~/.gradle/caches minus the build-cache/daemon slices clean_dev_jvm
+    # already resets: modules-2 is the dependency store builds resolve from,
+    # so it is surfaced for review like ~/.m2 rather than deleted.
+    _report_large_or_stop "Gradle caches" "$HOME/.gradle/caches" || return $?
+
+    # Emulator images, SDK system images, downloaded models, and installed
+    # runtimes are user-chosen payloads, not caches. Size is shown so the
+    # owner tool (Device Manager, SDK Manager, huggingface-cli, mise) can
+    # remove what is unused; Mole never deletes them.
+    local android_avd_root="$HOME/.android/avd"
+    [[ "${ANDROID_AVD_HOME:-}" == /* ]] && android_avd_root="$ANDROID_AVD_HOME"
+    _report_large_or_stop "Android emulators" "$android_avd_root" "" "date" || return $?
+    local android_sdk_root="$HOME/Library/Android/sdk"
+    if [[ "${ANDROID_HOME:-}" == /* ]]; then
+        android_sdk_root="$ANDROID_HOME"
+    elif [[ "${ANDROID_SDK_ROOT:-}" == /* ]]; then
+        android_sdk_root="$ANDROID_SDK_ROOT"
+    fi
+    _report_large_or_stop "Android system images" "$android_sdk_root/system-images" || return $?
+    local hf_root="$HOME/.cache/huggingface"
+    [[ "${HF_HOME:-}" == /* ]] && hf_root="$HF_HOME"
+    _report_large_or_stop "Hugging Face cache" "$hf_root" || return $?
+    local mise_installs="$HOME/.local/share/mise/installs"
+    [[ "${MISE_DATA_DIR:-}" == /* ]] && mise_installs="$MISE_DATA_DIR/installs"
+    local mise_tool_dir
+    for mise_tool_dir in "$mise_installs"/*; do
+        [[ -d "$mise_tool_dir" && ! -L "$mise_tool_dir" ]] || continue
+        _report_large_or_stop "mise ${mise_tool_dir##*/} installs" "$mise_tool_dir" || return $?
+    done
 
     # JetBrains keeps one data dir per IDE version (GoLand2025.1, ...). After
     # an upgrade the previous version's dir lingers forever with plugins and
