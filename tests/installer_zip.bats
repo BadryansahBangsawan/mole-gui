@@ -6,19 +6,19 @@ setup_file() {
     mole_test_setup_home installers-home
 
     if command -v zip > /dev/null 2>&1; then
-        ZIP_AVAILABLE=1
+        export ZIP_AVAILABLE=1
     else
-        ZIP_AVAILABLE=0
+        export ZIP_AVAILABLE=0
     fi
     if command -v zipinfo > /dev/null 2>&1 || command -v unzip > /dev/null 2>&1; then
-        ZIP_LIST_AVAILABLE=1
+        export ZIP_LIST_AVAILABLE=1
     else
-        ZIP_LIST_AVAILABLE=0
+        export ZIP_LIST_AVAILABLE=0
     fi
     if command -v unzip > /dev/null 2>&1; then
-        UNZIP_AVAILABLE=1
+        export UNZIP_AVAILABLE=1
     else
-        UNZIP_AVAILABLE=0
+        export UNZIP_AVAILABLE=0
     fi
 }
 
@@ -124,13 +124,15 @@ require_unzip_support() {
 
     # Create a ZIP where .app appears after the 50th entry
     mkdir -p "$HOME/Downloads/deep-content"
-    # Create 51 regular files first
+    local -a ordered_entries=()
     for i in {1..51}; do
         touch "$HOME/Downloads/deep-content/file$i.txt"
+        ordered_entries+=("deep-content/file$i.txt")
     done
-    # Add .app file at the end (52nd entry)
+    # Explicit ZIP argument order avoids relying on filesystem traversal order.
     touch "$HOME/Downloads/deep-content/MyApp.app"
-    (cd "$HOME/Downloads" && zip -q -r deep.zip deep-content)
+    ordered_entries+=("deep-content/MyApp.app")
+    (cd "$HOME/Downloads" && zip -q deep.zip "${ordered_entries[@]}")
 
     run /bin/bash -euo pipefail -c '
         export MOLE_TEST_MODE=1

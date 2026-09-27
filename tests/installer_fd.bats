@@ -6,9 +6,9 @@ setup_file() {
     mole_test_setup_home installers-home
 
     if command -v fd > /dev/null 2>&1; then
-        FD_AVAILABLE=1
+        export FD_AVAILABLE=1
     else
-        FD_AVAILABLE=0
+        export FD_AVAILABLE=0
     fi
 }
 
@@ -138,11 +138,11 @@ require_fd() {
     ' bash "$PROJECT_ROOT/bin/installer.sh" "$HOME/Downloads"
 
     [ "$status" -eq 0 ]
-    # Default max depth is 2
-    [[ "$output" == *"shallow.dmg"* ]] || return 1
-    [[ "$output" == *"mid.dmg"* ]] || return 1
-    [[ "$output" == *"deep.dmg"* ]] || return 1
-    [[ "$output" != *"too-deep.dmg"* ]]
+    # Match find's depth boundary and assert complete paths.
+    [[ "$output" == *"/shallow.dmg"* ]] || return 1
+    [[ "$output" == *"/level1/mid.dmg"* ]] || return 1
+    [[ "$output" != *"/level1/level2/deep.dmg"* ]] || return 1
+    [[ "$output" != *"/level1/level2/level3/too-deep.dmg"* ]]
 }
 
 @test "scan_installers_in_path (fd): honors MOLE_INSTALLER_SCAN_MAX_DEPTH" {
