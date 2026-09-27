@@ -2193,6 +2193,17 @@ safe_sudo_remove() {
 # Unified deletion helper (Trash + permanent routing with forensic log)
 # ============================================================================
 
+# Capture the device, inode, and mtime contract accepted by mole_delete.
+# Failure never falls back to a path-only identity.
+mole_deletion_identity() {
+    local path="$1"
+    local duration identity
+    duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_QUICK_DETECT_SEC" "${2:-}") || return $?
+    identity=$(run_with_timeout "$duration" "$STAT_BSD" -f%d:%i:%m "$path" < /dev/null 2> /dev/null) || return $?
+    [[ "$identity" =~ ^[0-9]+:[0-9]+:-?[0-9]+$ ]] || return 1
+    printf '%s\n' "$identity"
+}
+
 # Route a deletion through either macOS Trash or permanent rm, while logging
 # every call for forensic review. Designed for destructive paths where undo
 # matters (e.g. uninstall). Not used by cache-clean paths.
@@ -2305,8 +2316,7 @@ mole_delete() {
         expected_target_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
         local current_identity=""
         local identity_rc=0
-        current_identity=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
-            "$STAT_BSD" -f%d:%i:%m "$path" 2> /dev/null) || identity_rc=$?
+        current_identity=$(mole_deletion_identity "$path") || identity_rc=$?
         if mole_rc_timeout_or_signal "$identity_rc"; then
             local identity_status="interrupted"
             mole_rc_timeout "$identity_rc" && identity_status="timed-out"

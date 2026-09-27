@@ -675,6 +675,7 @@ installer_file_size_bytes() {
 build_installer_delete_plan() {
     reset_installer_delete_plan
 
+    local deadline=$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))
     local idx
     for idx in "$@"; do
         if [[ ! "$idx" =~ ^[0-9]+$ ]] || [[ $idx -ge ${#INSTALLER_PATHS[@]} ]]; then
@@ -688,9 +689,19 @@ build_installer_delete_plan() {
             file_size=0
         fi
 
+        local identity identity_rc=0
+        identity=$(mole_deletion_identity "$file_path" "$deadline") || identity_rc=$?
+        if [[ $identity_rc -ne 0 ]]; then
+            record_installer_delete_failure "$file_path" "identity unavailable"
+            if mole_rc_timeout_or_signal "$identity_rc"; then
+                reset_installer_delete_plan
+                return "$identity_rc"
+            fi
+            continue
+        fi
         INSTALLER_DELETE_PATHS+=("$file_path")
         INSTALLER_DELETE_SIZES+=("$file_size")
-        INSTALLER_DELETE_IDENTITIES+=("$(mole_path_identity "$file_path")")
+        INSTALLER_DELETE_IDENTITIES+=("$identity")
     done
 
     [[ ${#INSTALLER_DELETE_PATHS[@]} -gt 0 ]]
@@ -708,8 +719,13 @@ execute_installer_delete_plan() {
             continue
         fi
 
-        local current_identity
-        current_identity=$(mole_path_identity "$file_path")
+        local current_identity identity_rc=0
+        current_identity=$(mole_deletion_identity "$file_path") || identity_rc=$?
+        if [[ $identity_rc -ne 0 ]]; then
+            record_installer_delete_failure "$file_path" "identity unavailable"
+            mole_rc_timeout_or_signal "$identity_rc" && return "$identity_rc"
+            continue
+        fi
         if [[ "$current_identity" != "$planned_identity" ]]; then
             record_installer_delete_failure "$file_path" "changed since scan"
             continue
@@ -729,7 +745,7 @@ execute_installer_delete_plan() {
             continue
         fi
 
-        if mole_delete "$file_path" false; then
+        if mole_delete "$file_path" false "$planned_identity"; then
             if [[ "${MOLE_DRY_RUN:-0}" == "1" ]] || [[ ! -e "$file_path" && ! -L "$file_path" ]]; then
                 total_size_freed_kb=$((total_size_freed_kb + ((current_size + 1023) / 1024)))
                 total_deleted=$((total_deleted + 1))
@@ -739,7 +755,7 @@ execute_installer_delete_plan() {
         else
             local delete_rc=$?
             record_installer_delete_failure "$file_path" "delete failed"
-            if mole_rc_timeout_or_signal "$delete_rc" && ! mole_rc_timeout "$delete_rc"; then
+            if mole_rc_timeout_or_signal "$delete_rc"; then
                 return "$delete_rc"
             fi
         fi
@@ -765,7 +781,10 @@ delete_selected_installers() {
         return 1
     fi
 
-    if ! build_installer_delete_plan "${selected_indices[@]}"; then
+    local plan_status=0
+    build_installer_delete_plan "${selected_indices[@]}" || plan_status=$?
+    if [[ $plan_status -ne 0 ]]; then
+        mole_rc_timeout_or_signal "$plan_status" && return "$plan_status"
         if [[ $total_delete_failed -gt 0 ]]; then
             return "$INSTALLER_EXIT_INCOMPLETE"
         fi

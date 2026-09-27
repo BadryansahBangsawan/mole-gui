@@ -385,32 +385,37 @@ require_fd() {
     touch "$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg"
     local boundary
     for boundary in size delete; do
-        run /bin/bash --noprofile --norc -c '
-            export MOLE_TEST_MODE=1
-            source "$1"
-            INSTALLER_PATHS=("$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg")
-            INSTALLER_SIZES=(0 0)
-            build_installer_delete_plan 0 1
-            interruption_trace="$3"
-            case "$2" in
-                size) installer_file_size_bytes() {
-                    [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return 130
-                    printf "%s\n" "$1" >> "$interruption_trace"
-                    get_file_size "$1"
-                } ;;
-                delete) mole_delete() {
-                    [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return 130
-                    printf "%s\n" "$1" >> "$interruption_trace"
-                    return 0
-                } ;;
-            esac
-            rc=0
-            execute_installer_delete_plan || rc=$?
-            [[ $rc -eq 130 && $total_delete_failed -eq 1 ]] || exit 1
-            [[ ! -e "$interruption_trace" ]] || exit 1
-            [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/second.dmg" ]] || exit 1
-        ' bash "$PROJECT_ROOT/bin/installer.sh" "$boundary" "$BATS_TEST_TMPDIR/$boundary-trace"
-        [ "$status" -eq 0 ] || return 1
+        local cancel_status
+        for cancel_status in 130 124; do
+            [[ "$boundary" != size || $cancel_status -eq 130 ]] || continue
+            run /bin/bash --noprofile --norc -c '
+                export MOLE_TEST_MODE=1
+                source "$1"
+                INSTALLER_PATHS=("$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg")
+                INSTALLER_SIZES=(0 0)
+                build_installer_delete_plan 0 1
+                interruption_trace="$3"
+                cancel_status="$4"
+                case "$2" in
+                    size) installer_file_size_bytes() {
+                        [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return "$cancel_status"
+                        printf "%s\n" "$1" >> "$interruption_trace"
+                        get_file_size "$1"
+                    } ;;
+                    delete) mole_delete() {
+                        [[ "$1" == "$HOME/Downloads/first.dmg" ]] && return "$cancel_status"
+                        printf "%s\n" "$1" >> "$interruption_trace"
+                        return 0
+                    } ;;
+                esac
+                rc=0
+                execute_installer_delete_plan || rc=$?
+                [[ $rc -eq $cancel_status && $total_delete_failed -eq 1 ]] || exit 1
+                [[ ! -e "$interruption_trace" ]] || exit 1
+                [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/second.dmg" ]] || exit 1
+            ' bash "$PROJECT_ROOT/bin/installer.sh" "$boundary" "$BATS_TEST_TMPDIR/$boundary-$cancel_status-trace" "$cancel_status"
+            [ "$status" -eq 0 ] || return 1
+        done
     done
 }
 
@@ -529,5 +534,35 @@ require_fd() {
             [[ "${INSTALLER_PATHS[0]}" == "$root/expected.dmg" ]] || exit 1
         ' bash "$PROJECT_ROOT/bin/installer.sh" "$backend" "$fixture_root/linked-root"
         [ "$status" -eq 0 ] || return 1
+    done
+}
+
+@test "interrupted installer plan cannot confirm or probe later selections" {
+    local fixture_root="$BATS_TEST_TMPDIR/plan-cancellation"
+    mkdir -p "$fixture_root"
+    touch "$fixture_root/first.dmg" "$fixture_root/second.dmg"
+    local cancel_status
+    for cancel_status in 124 130; do
+        run /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            root="$2"
+            cancel_status="$3"
+            trace="$root/$cancel_status.trace"
+            INSTALLER_PATHS=("$root/first.dmg" "$root/second.dmg")
+            INSTALLER_SIZES=(0 0)
+            MOLE_SELECTION_RESULT=0,1
+            mole_deletion_identity() {
+                [[ "$1" != "$root/first.dmg" ]] || return "$cancel_status"
+                printf "%s\n" "$1" >> "$trace"
+                "$STAT_BSD" -f%d:%i:%m "$1"
+            }
+            rc=0
+            delete_selected_installers </dev/null || rc=$?
+            [[ $rc -eq $cancel_status && ${#INSTALLER_DELETE_PATHS[@]} -eq 0 ]] || exit 1
+            [[ ! -e "$trace" && -f "$root/first.dmg" && -f "$root/second.dmg" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$fixture_root" "$cancel_status"
+        [ "$status" -eq 0 ] || return 1
+        [[ "$output" != *"Files to be removed"* ]] || return 1
     done
 }
