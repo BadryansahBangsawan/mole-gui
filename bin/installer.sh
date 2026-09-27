@@ -120,21 +120,27 @@ scan_installers_in_path() {
     [[ -d "$path" ]] || return 0
 
     # A failed producer must never publish its partial candidate prefix.
-    local scan_file filtered_file file scan_timeout scan_rc=0
+    local scan_file filtered_file errors_file file scan_timeout scan_rc=0
     scan_file=$(create_temp_file) || return 1
     filtered_file=$(create_temp_file) || return 1
+    errors_file=$(create_temp_file) || return 1
     scan_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline") || scan_rc=$?
     if [[ $scan_rc -eq 0 ]]; then
         if command -v fd > /dev/null 2>&1; then
-            run_with_timeout "$scan_timeout" fd --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
+            run_with_timeout "$scan_timeout" fd --show-errors --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
                 -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
-                . "$path" > "$scan_file" 2> /dev/null || scan_rc=$?
+                . "$path" > "$scan_file" 2> "$errors_file" || scan_rc=$?
         else
             run_with_timeout "$scan_timeout" find "$path" -maxdepth "$max_depth" -type f \
                 \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
                 -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0 \
-                > "$scan_file" 2> /dev/null || scan_rc=$?
+                > "$scan_file" 2> "$errors_file" || scan_rc=$?
         fi
+    fi
+    # fd reports traversal errors on stderr while still returning success.
+    # Treat any producer diagnostic as an incomplete inventory, without parsing it.
+    if [[ $scan_rc -eq 0 && -s "$errors_file" ]]; then
+        scan_rc=$INSTALLER_EXIT_SCAN_FAILED
     fi
     if [[ $scan_rc -eq 0 ]]; then
         while IFS= read -r -d '' file; do
@@ -154,7 +160,7 @@ scan_installers_in_path() {
     if [[ $scan_rc -eq 0 ]]; then
         cat "$filtered_file" || scan_rc=$?
     fi
-    rm -f "$scan_file" "$filtered_file" # SAFE: tracked mktemp files created by this scan
+    rm -f "$scan_file" "$filtered_file" "$errors_file" # SAFE: tracked mktemp files created by this scan
     if [[ $scan_rc -ne 0 ]]; then
         INSTALLER_SCAN_FAILURE_PATH="$path"
     fi

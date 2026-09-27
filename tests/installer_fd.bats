@@ -387,3 +387,32 @@ require_fd() {
     ' bash "$PROJECT_ROOT/bin/installer.sh"
     [ "$status" -eq 0 ]
 }
+
+@test "fd filesystem diagnostics reject a successful but incomplete traversal" {
+    if ! require_fd; then
+        skip "fd is unavailable"
+    fi
+    mkdir -p "$HOME/Downloads/denied"
+    touch "$HOME/Downloads/visible.dmg" "$HOME/Downloads/denied/hidden.dmg"
+    chmod 000 "$HOME/Downloads/denied"
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        rc=0
+        scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+        [[ $rc -eq $INSTALLER_EXIT_SCAN_FAILED && ! -s "$2" ]] || exit 1
+        [[ "$INSTALLER_SCAN_FAILURE_PATH" == "$HOME/Downloads" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
+    chmod 700 "$HOME/Downloads/denied"
+    [ "$status" -eq 0 ] || return 1
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_installers_in_path "$HOME/Downloads" > "$2"
+        while IFS= read -r -d "" file; do
+            [[ "$file" == "$HOME/Downloads/denied/hidden.dmg" ]] && exit 0
+        done < "$2"
+        exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/recovered-scan"
+    [ "$status" -eq 0 ]
+}
