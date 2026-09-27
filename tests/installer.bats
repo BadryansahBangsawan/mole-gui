@@ -464,3 +464,38 @@ setup() {
 	[[ "$output" == *"Failed to remove"* ]] || return 1
 	[[ ! -e "$removable" ]]
 }
+
+@test "installer deletion binds the confirmed identity at the final sink" {
+    local mode
+    for mode in real dry; do
+        local fixture_root="$BATS_TEST_TMPDIR/identity-$mode"
+        mkdir -p "$fixture_root"
+        printf 'old' > "$fixture_root/selected.dmg"
+        printf 'new' > "$fixture_root/replacement.dmg"
+        # shellcheck disable=SC2016 # The child shell evaluates this script.
+        run /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 MOLE_DELETE_MODE=permanent
+            source "$1"
+            target="$2/selected.dmg"
+            export MOLE_DELETE_LOG="$2/deletions.log"
+            INSTALLER_PATHS=("$target")
+            INSTALLER_SIZES=(3)
+            build_installer_delete_plan 0
+            [[ "$3" != dry ]] || export MOLE_DRY_RUN=1
+            installer_file_size_bytes() {
+                /bin/mv "$target" "${target}.original"
+                /bin/mv "${target%/*}/replacement.dmg" "$target"
+                printf "3\n"
+            }
+            rc=0
+            execute_installer_delete_plan || rc=$?
+            [[ $rc -eq $INSTALLER_EXIT_INCOMPLETE ]] || exit 1
+            [[ $total_deleted -eq 0 && $total_size_freed_kb -eq 0 && $total_delete_failed -eq 1 ]] || exit 1
+            [[ -f "$target" && -f "${target}.original" ]] || exit 1
+            [[ "$(cat "$target")" == new ]] || exit 1
+            [[ "$(cat "${target}.original")" == old ]] || exit 1
+            grep -F "identity-changed" "$MOLE_DELETE_LOG" >/dev/null
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$fixture_root" "$mode"
+        [ "$status" -eq 0 ] || return 1
+    done
+}
