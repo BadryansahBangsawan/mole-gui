@@ -91,12 +91,12 @@ handle_candidate_file() {
     [[ -L "$file" ]] && return 0 # Skip symlinks explicitly
     case "$file" in
         *.dmg | *.pkg | *.mpkg | *.iso | *.xip)
-            echo "$file"
+            printf '%s\0' "$file"
             ;;
         *.zip)
             [[ -r "$file" ]] || return 0
             if is_installer_zip "$file" 2> /dev/null; then
-                echo "$file"
+                printf '%s\0' "$file"
             fi
             ;;
     esac
@@ -113,17 +113,17 @@ scan_installers_in_path() {
     scan_file=$(create_temp_file) || return 1
     filtered_file=$(create_temp_file) || return 1
     if command -v fd > /dev/null 2>&1; then
-        fd --no-ignore --hidden --type f --max-depth "$max_depth" \
+        fd --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
             -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
             . "$path" > "$scan_file" 2> /dev/null || scan_rc=$?
     else
         find "$path" -maxdepth "$max_depth" -type f \
             \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
-            -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) \
+            -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0 \
             > "$scan_file" 2> /dev/null || scan_rc=$?
     fi
     if [[ $scan_rc -eq 0 ]]; then
-        while IFS= read -r file; do
+        while IFS= read -r -d '' file; do
             handle_candidate_file "$file" >> "$filtered_file" || {
                 scan_rc=$?
                 break
@@ -195,6 +195,14 @@ format_installer_display() {
     local size_str="$2"
     local source="$3"
 
+    # Keep filenames literal in the plan, but prevent terminal control output.
+    if [[ "$filename" =~ [[:cntrl:]] ]]; then
+        printf -v filename '%q' "$filename"
+    fi
+    if [[ "$source" =~ [[:cntrl:]] ]]; then
+        printf -v source '%q' "$source"
+    fi
+
     # Terminal width for alignment
     local terminal_width
     terminal_width=$(get_terminal_width)
@@ -248,23 +256,27 @@ collect_installers() {
     # Scan all paths, deduplicate, and sort results
     local -a all_files=()
 
-    local scan_file scan_rc=0
+    local scan_file sorted_file file scan_rc=0
     scan_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
+    sorted_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
     scan_all_installers > "$scan_file" || scan_rc=$?
+    if [[ $scan_rc -eq 0 ]]; then
+        sort -zu "$scan_file" > "$sorted_file" || scan_rc=$?
+    fi
     if [[ $scan_rc -ne 0 ]]; then
-        rm -f "$scan_file" # SAFE: tracked mktemp file created by this collection
+        rm -f "$scan_file" "$sorted_file" # SAFE: tracked mktemp files created by this collection
         [[ ! -t 1 ]] || stop_inline_spinner
         if mole_rc_timeout_or_signal "$scan_rc"; then
             return "$scan_rc"
         fi
         return "$INSTALLER_EXIT_SCAN_FAILED"
     fi
-    while IFS= read -r file; do
+    while IFS= read -r -d '' file; do
         [[ -z "$file" ]] && continue
         all_files+=("$file")
         debug_file_action "Found installer" "$file"
-    done < <(sort -u "$scan_file")
-    rm -f "$scan_file" # SAFE: tracked mktemp file created by this collection
+    done < "$sorted_file"
+    rm -f "$scan_file" "$sorted_file" # SAFE: tracked mktemp files created by this collection
 
     if [[ -t 1 ]]; then
         stop_inline_spinner
@@ -300,7 +312,7 @@ collect_installers() {
 
         # Get display filename - strip Homebrew hash prefix if present
         local display_name
-        display_name=$(basename "$file")
+        display_name="${file##*/}"
         if [[ "$source" == "Homebrew" ]]; then
             # Homebrew names often look like: sha256--name--version
             # Strip the leading hash if it matches [0-9a-f]{64}--

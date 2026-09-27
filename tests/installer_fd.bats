@@ -45,7 +45,7 @@ require_fd() {
 @test "installer discovery discards fd output when the producer fails" {
     touch "$HOME/Downloads/incomplete.dmg"
     # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
-    mole_test_fake_command fd 'printf "%s\n" "$HOME/Downloads/incomplete.dmg"; exit 74'
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/incomplete.dmg"; exit 74'
 
     run /bin/bash --noprofile --norc -c '
         export MOLE_TEST_MODE=1
@@ -62,7 +62,7 @@ require_fd() {
 @test "failed installer discovery never reaches selection or reports an empty scan" {
     touch "$HOME/Downloads/incomplete.dmg"
     # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
-    mole_test_fake_command fd 'printf "%s\n" "$HOME/Downloads/incomplete.dmg"; exit 74'
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/incomplete.dmg"; exit 74'
     run /bin/bash --noprofile --norc -c '
         export MOLE_TEST_MODE=1
         source "$1"
@@ -275,4 +275,44 @@ require_fd() {
     [[ "$output" == *"real.dmg"* ]] || return 1
     [[ "$output" != *"symlink.dmg"* ]] || return 1
     [[ "$output" != *"dangling.lnk"* ]]
+}
+
+@test "installer collection preserves exact filenames and deduplicates overlapping roots" {
+    local fixture="$HOME/Downloads/first"$'\n'"second.dmg"
+    touch "$fixture"
+    local scan_path
+    for scan_path in "$PATH" "/usr/bin:/bin"; do
+        # shellcheck disable=SC2016 # The child shell evaluates this script.
+        run env PATH="$scan_path" /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            scan_all_installers() {
+                scan_installers_in_path "$HOME/Downloads" || return $?
+                scan_installers_in_path "$HOME/Downloads"
+            }
+            collect_installers
+            [[ ${#INSTALLER_PATHS[@]} -eq 1 ]] || exit 1
+            [[ "${INSTALLER_PATHS[0]}" == "$2" ]] || exit 1
+            [[ ! "${DISPLAY_NAMES[0]}" =~ [[:cntrl:]] ]] || exit 1
+            build_installer_delete_plan 0
+            [[ "${INSTALLER_DELETE_PATHS[0]}" == "$2" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$fixture"
+        [ "$status" -eq 0 ] || return 1
+    done
+}
+
+@test "installer collection discards output from failed sorting" {
+    touch "$HOME/Downloads/valid.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command sort 'printf "%s\0" "$HOME/Downloads/valid.dmg"; exit 74'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_all_installers() { scan_installers_in_path "$HOME/Downloads"; }
+        rc=0
+        collect_installers || rc=$?
+        [[ $rc -eq $INSTALLER_EXIT_SCAN_FAILED ]] || exit 1
+        [[ ${#INSTALLER_PATHS[@]} -eq 0 ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
 }
