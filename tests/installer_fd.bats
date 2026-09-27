@@ -352,3 +352,38 @@ require_fd() {
     ' bash "$PROJECT_ROOT/bin/installer.sh"
     [ "$status" -eq 0 ]
 }
+
+@test "installer collection never publishes metadata from a vanished candidate" {
+    touch "$HOME/Downloads/first.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/first.dmg" "$HOME/Downloads/vanished.dmg"'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_all_installers() { scan_installers_in_path "$HOME/Downloads" "$1"; }
+        rc=0
+        collect_installers || rc=$?
+        [[ $rc -eq $INSTALLER_EXIT_SCAN_FAILED ]] || exit 1
+        [[ ${#INSTALLER_PATHS[@]} -eq 0 && ${#INSTALLER_SIZES[@]} -eq 0 ]] || exit 1
+        [[ ${#INSTALLER_SOURCES[@]} -eq 0 && ${#DISPLAY_NAMES[@]} -eq 0 ]] || exit 1
+        [[ -f "$HOME/Downloads/first.dmg" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "interrupted installer size recheck stops before later deletions" {
+    touch "$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg"
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        INSTALLER_PATHS=("$HOME/Downloads/first.dmg" "$HOME/Downloads/second.dmg")
+        INSTALLER_SIZES=(0 0)
+        build_installer_delete_plan 0 1
+        installer_file_size_bytes() { return 130; }
+        rc=0
+        execute_installer_delete_plan || rc=$?
+        [[ $rc -eq 130 && $total_delete_failed -eq 1 ]] || exit 1
+        [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/second.dmg" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ]
+}

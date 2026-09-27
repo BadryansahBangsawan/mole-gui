@@ -277,7 +277,7 @@ collect_installers() {
     debug_operation_start "Collect Installers" "Scanning for redundant installer files"
 
     # Scan all paths, deduplicate, and sort results
-    local -a all_files=()
+    local -a all_files=() sizes=() sources=() displays=()
 
     local deadline=$((SECONDS + 10#${MOLE_TIMEOUT_DISK_VERIFY_SEC%%.*}))
     local scan_file sorted_file file scan_timeout scan_rc=0
@@ -324,10 +324,12 @@ collect_installers() {
     # Process each installer
     for file in "${all_files[@]}"; do
         # Calculate file size
-        local file_size=0
-        if [[ -f "$file" ]]; then
-            file_size=$(get_file_size "$file")
-        fi
+        local file_size
+        file_size=$(installer_file_size_bytes "$file" "$deadline") || {
+            scan_rc=$?
+            INSTALLER_SCAN_FAILURE_PATH="$file"
+            break
+        }
 
         # Get source directory
         local source
@@ -353,15 +355,26 @@ collect_installers() {
         display=$(format_installer_display "$display_name" "$size_human" "$source")
 
         # Store installer data in parallel arrays
-        INSTALLER_PATHS+=("$file")
-        INSTALLER_SIZES+=("$file_size")
-        INSTALLER_SOURCES+=("$source")
-        DISPLAY_NAMES+=("$display")
+        sizes+=("$file_size")
+        sources+=("$source")
+        displays+=("$display")
     done
 
     if [[ -t 1 ]]; then
         stop_inline_spinner
     fi
+    if [[ $scan_rc -eq 0 ]]; then
+        _mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline" > /dev/null || scan_rc=$?
+    fi
+    if [[ $scan_rc -ne 0 ]]; then
+        mole_rc_timeout_or_signal "$scan_rc" && return "$scan_rc"
+        return "$INSTALLER_EXIT_SCAN_FAILED"
+    fi
+    # Publish the parallel arrays together only after every metadata probe finishes.
+    INSTALLER_PATHS=("${all_files[@]}")
+    INSTALLER_SIZES=("${sizes[@]}")
+    INSTALLER_SOURCES=("${sources[@]}")
+    DISPLAY_NAMES=("${displays[@]}")
     return 0
 }
 
@@ -629,9 +642,10 @@ record_installer_delete_failure() {
 
 installer_file_size_bytes() {
     local file_path="$1"
-    local file_size
+    local file_size duration
 
-    file_size=$(get_file_size "$file_path" 2> /dev/null || echo "")
+    duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_QUICK_DETECT_SEC" "${2:-}") || return $?
+    file_size=$(run_with_timeout "$duration" "$STAT_BSD" -f%z "$file_path" < /dev/null 2> /dev/null) || return $?
     [[ "$file_size" =~ ^[0-9]+$ ]] || return 1
     printf '%s\n' "$file_size"
 }
@@ -679,9 +693,13 @@ execute_installer_delete_plan() {
             continue
         fi
 
-        local current_size
-        if ! current_size=$(installer_file_size_bytes "$file_path"); then
+        local current_size size_rc=0
+        current_size=$(installer_file_size_bytes "$file_path") || size_rc=$?
+        if [[ $size_rc -ne 0 ]]; then
             record_installer_delete_failure "$file_path" "size unavailable"
+            if mole_rc_timeout_or_signal "$size_rc" && ! mole_rc_timeout "$size_rc"; then
+                return "$size_rc"
+            fi
             continue
         fi
         if [[ "$current_size" != "$planned_size" ]]; then
@@ -697,7 +715,11 @@ execute_installer_delete_plan() {
                 record_installer_delete_failure "$file_path" "still exists"
             fi
         else
+            local delete_rc=$?
             record_installer_delete_failure "$file_path" "delete failed"
+            if mole_rc_timeout_or_signal "$delete_rc" && ! mole_rc_timeout "$delete_rc"; then
+                return "$delete_rc"
+            fi
         fi
     done
 
