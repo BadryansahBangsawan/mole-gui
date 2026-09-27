@@ -468,6 +468,7 @@ require_fd() {
         fi
         local scan_path="$PATH"
         [[ "$backend" == find ]] && scan_path="/usr/bin:/bin"
+        # shellcheck disable=SC2016 # The child shell evaluates this script.
         run env PATH="$scan_path" /bin/bash --noprofile --norc -c '
             export MOLE_TEST_MODE=1
             source "$1"
@@ -490,6 +491,7 @@ require_fd() {
     touch "$HOME/Downloads/visible.dmg"
     # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
     mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/visible.dmg"; echo "[fd error]: $HOME/Downloads/disk: Input/output error (os error 5)" >&2; exit 0'
+    # shellcheck disable=SC2016 # The child shell evaluates this script.
     run /bin/bash --noprofile --norc -c '
         export MOLE_TEST_MODE=1
         source "$1"
