@@ -53,6 +53,8 @@ readonly INSTALLER_SCAN_PATHS=(
 )
 readonly MAX_ZIP_ENTRIES=50
 readonly INSTALLER_EXIT_INCOMPLETE=3
+readonly INSTALLER_EXIT_SCAN_FAILED=4
+INSTALLER_SCAN_FAILURE_PATH=""
 ZIP_LIST_CMD=()
 IN_ALT_SCREEN=0
 
@@ -106,31 +108,41 @@ scan_installers_in_path() {
 
     [[ -d "$path" ]] || return 0
 
-    local file
-
+    # A failed producer must never publish its partial candidate prefix.
+    local scan_file filtered_file file scan_rc=0
+    scan_file=$(create_temp_file) || return 1
+    filtered_file=$(create_temp_file) || return 1
     if command -v fd > /dev/null 2>&1; then
-        while IFS= read -r file; do
-            handle_candidate_file "$file"
-        done < <(
-            fd --no-ignore --hidden --type f --max-depth "$max_depth" \
-                -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
-                . "$path" 2> /dev/null || true
-        )
+        fd --no-ignore --hidden --type f --max-depth "$max_depth" \
+            -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
+            . "$path" > "$scan_file" 2> /dev/null || scan_rc=$?
     else
-        while IFS= read -r file; do
-            handle_candidate_file "$file"
-        done < <(
-            find "$path" -maxdepth "$max_depth" -type f \
-                \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
-                -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) \
-                2> /dev/null || true
-        )
+        find "$path" -maxdepth "$max_depth" -type f \
+            \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
+            -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) \
+            > "$scan_file" 2> /dev/null || scan_rc=$?
     fi
+    if [[ $scan_rc -eq 0 ]]; then
+        while IFS= read -r file; do
+            handle_candidate_file "$file" >> "$filtered_file" || {
+                scan_rc=$?
+                break
+            }
+        done < "$scan_file"
+    fi
+    if [[ $scan_rc -eq 0 ]]; then
+        cat "$filtered_file" || scan_rc=$?
+    fi
+    rm -f "$scan_file" "$filtered_file" # SAFE: tracked mktemp files created by this scan
+    if [[ $scan_rc -ne 0 ]]; then
+        INSTALLER_SCAN_FAILURE_PATH="$path"
+    fi
+    return "$scan_rc"
 }
 
 scan_all_installers() {
     for path in "${INSTALLER_SCAN_PATHS[@]}"; do
-        scan_installers_in_path "$path"
+        scan_installers_in_path "$path" || return $?
     done
 }
 
@@ -223,6 +235,7 @@ collect_installers() {
     INSTALLER_SIZES=()
     INSTALLER_SOURCES=()
     DISPLAY_NAMES=()
+    INSTALLER_SCAN_FAILURE_PATH=""
 
     # Start scanning with spinner
     if [[ -t 1 ]]; then
@@ -235,11 +248,23 @@ collect_installers() {
     # Scan all paths, deduplicate, and sort results
     local -a all_files=()
 
+    local scan_file scan_rc=0
+    scan_file=$(create_temp_file) || return "$INSTALLER_EXIT_SCAN_FAILED"
+    scan_all_installers > "$scan_file" || scan_rc=$?
+    if [[ $scan_rc -ne 0 ]]; then
+        rm -f "$scan_file" # SAFE: tracked mktemp file created by this collection
+        [[ ! -t 1 ]] || stop_inline_spinner
+        if mole_rc_timeout_or_signal "$scan_rc"; then
+            return "$scan_rc"
+        fi
+        return "$INSTALLER_EXIT_SCAN_FAILED"
+    fi
     while IFS= read -r file; do
         [[ -z "$file" ]] && continue
         all_files+=("$file")
         debug_file_action "Found installer" "$file"
-    done < <(scan_all_installers | sort -u)
+    done < <(sort -u "$scan_file")
+    rm -f "$scan_file" # SAFE: tracked mktemp file created by this collection
 
     if [[ -t 1 ]]; then
         stop_inline_spinner
@@ -726,12 +751,22 @@ perform_installers() {
     fi
 
     # Collect installers
-    if ! collect_installers; then
+    local collect_status=0
+    collect_installers || collect_status=$?
+    if [[ $collect_status -ne 0 ]]; then
         if [[ -t 1 ]]; then
             leave_alt_screen
             IN_ALT_SCREEN=0
         fi
         printf '\n'
+        if [[ $collect_status -ne 1 ]]; then
+            printf '%sInstaller scan incomplete%s; no files selected' "$YELLOW" "$NC" >&2
+            if [[ -n "$INSTALLER_SCAN_FAILURE_PATH" ]]; then
+                printf ' (%s)' "$INSTALLER_SCAN_FAILURE_PATH" >&2
+            fi
+            printf '\n' >&2
+            return "$collect_status"
+        fi
         echo -e "${GREEN}${ICON_SUCCESS}${NC} Great! No installer files to clean"
         printf '\n'
         return 2 # Nothing to clean
@@ -856,11 +891,17 @@ main() {
             show_summary
             return 1
             ;;
+        "$INSTALLER_EXIT_SCAN_FAILED")
+            return 1
+            ;;
         1)
             printf '\n'
             ;;
         2)
             # Already handled by collect_installers
+            ;;
+        *)
+            return "$exit_code"
             ;;
     esac
 

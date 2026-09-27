@@ -42,6 +42,44 @@ require_fd() {
     [[ "${FD_AVAILABLE:-0}" -eq 1 ]]
 }
 
+@test "installer discovery discards fd output when the producer fails" {
+    touch "$HOME/Downloads/incomplete.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\n" "$HOME/Downloads/incomplete.dmg"; exit 74'
+
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        rc=0
+        scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+        [[ $rc -eq 74 ]] || exit 1
+        [[ ! -s "$2" ]] || exit 1
+        [[ -f "$HOME/Downloads/incomplete.dmg" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
+    [ "$status" -eq 0 ]
+}
+
+@test "failed installer discovery never reaches selection or reports an empty scan" {
+    touch "$HOME/Downloads/incomplete.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\n" "$HOME/Downloads/incomplete.dmg"; exit 74'
+    run /bin/bash --noprofile --norc -c '
+        export MOLE_TEST_MODE=1
+        source "$1"
+        scan_all_installers() { scan_installers_in_path "$HOME/Downloads"; }
+        show_installer_menu() { echo SELECTED; return 0; }
+        rc=0
+        main || rc=$?
+        printf "RC=%s COUNT=%s\n" "$rc" "${#INSTALLER_PATHS[@]}"
+        [[ -f "$HOME/Downloads/incomplete.dmg" ]] || exit 1
+    ' bash "$PROJECT_ROOT/bin/installer.sh"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"RC=1 COUNT=0"* ]] || return 1
+    [[ "$output" == *"Installer scan incomplete"* ]] || return 1
+    [[ "$output" != *"SELECTED"* ]] || return 1
+    [[ "$output" != *"No installer files to clean"* ]]
+}
+
 @test "scan_installers_in_path (fd): finds .dmg files" {
     if ! require_fd; then
         return 0
