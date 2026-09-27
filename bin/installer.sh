@@ -129,16 +129,23 @@ scan_installers_in_path() {
     errors_file=$(create_temp_file) || return 1
     scan_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" "$deadline") || scan_rc=$?
     if [[ $scan_rc -eq 0 ]]; then
+        local -a scan_command=()
         if command -v fd > /dev/null 2>&1; then
-            run_with_timeout "$scan_timeout" fd --show-errors --print0 --no-ignore --hidden --type f --max-depth "$max_depth" \
-                -e dmg -e pkg -e mpkg -e iso -e xip -e zip \
-                . "$path" > "$scan_file" 2> "$errors_file" || scan_rc=$?
+            scan_command=(fd --show-errors --print0 --no-ignore --hidden --type f --max-depth "$max_depth"
+                -e dmg -e pkg -e mpkg -e iso -e xip -e zip . "$path")
         else
-            run_with_timeout "$scan_timeout" find "$path" -maxdepth "$max_depth" -type f \
-                \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg' \
-                -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0 \
-                > "$scan_file" 2> "$errors_file" || scan_rc=$?
+            scan_command=(find "$path" -maxdepth "$max_depth" -type f
+                \( -name '*.dmg' -o -name '*.pkg' -o -name '*.mpkg'
+                -o -name '*.iso' -o -name '*.xip' -o -name '*.zip' \) -print0)
         fi
+        # Redirect only the producer's diagnostics; the timeout supervisor owns
+        # its stderr, including debug traces. exec preserves the producer status.
+        # shellcheck disable=SC2016 # This script is evaluated by the child shell.
+        run_with_timeout "$scan_timeout" /bin/bash -c '
+            errors_file="$1"
+            shift
+            exec "$@" 2> "$errors_file"
+        ' bash "$errors_file" "${scan_command[@]}" > "$scan_file" || scan_rc=$?
     fi
     # fd reports traversal errors on stderr while still returning success.
     # Treat any producer diagnostic as an incomplete inventory, without parsing it.

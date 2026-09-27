@@ -480,3 +480,26 @@ require_fd() {
     ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/recovered-scan"
     [ "$status" -eq 0 ]
 }
+
+@test "debug traces do not turn healthy installer discovery into a failed scan" {
+    touch "$HOME/Downloads/healthy.dmg"
+    local backend
+    for backend in fd find; do
+        # shellcheck disable=SC2016 # The child shell evaluates this script.
+        run env MO_DEBUG=1 /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            backend="$2"
+            command() {
+                if [[ "$backend" == find && "${1:-}" == -v && "${2:-}" == fd ]]; then return 1; fi
+                builtin command "$@"
+            }
+            scan_all_installers() { scan_installers_in_path "$HOME/Downloads" "$1"; }
+            collect_installers
+            [[ ${#INSTALLER_PATHS[@]} -eq 1 ]] || exit 1
+            [[ "${INSTALLER_PATHS[0]}" == "$HOME/Downloads/healthy.dmg" ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$backend"
+        [ "$status" -eq 0 ] || return 1
+        [[ "$output" == *"[TIMEOUT]"* ]] || return 1
+    done
+}
