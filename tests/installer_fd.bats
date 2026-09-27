@@ -457,13 +457,39 @@ require_fd() {
     [[ "$output" != *"SELECTED"* ]]
 }
 
-@test "fd filesystem diagnostics reject a successful but incomplete traversal" {
-    if ! require_fd; then
-        skip "fd is unavailable"
-    fi
+@test "an unreadable subfolder keeps the readable installers with fd and find" {
     mkdir -p "$HOME/Downloads/denied"
     touch "$HOME/Downloads/visible.dmg" "$HOME/Downloads/denied/hidden.dmg"
     chmod 000 "$HOME/Downloads/denied"
+    local backend
+    for backend in fd find; do
+        if [[ "$backend" == fd ]] && ! require_fd; then
+            continue
+        fi
+        local scan_path="$PATH"
+        [[ "$backend" == find ]] && scan_path="/usr/bin:/bin"
+        run env PATH="$scan_path" /bin/bash --noprofile --norc -c '
+            export MOLE_TEST_MODE=1
+            source "$1"
+            rc=0
+            scan_installers_in_path "$HOME/Downloads" > "$2" || rc=$?
+            [[ $rc -eq 0 ]] || { echo "rc=$rc"; exit 1; }
+            seen_visible=0
+            while IFS= read -r -d "" file; do
+                [[ "$file" == "$HOME/Downloads/visible.dmg" ]] && seen_visible=1
+                [[ "$file" == "$HOME/Downloads/denied/hidden.dmg" ]] && exit 1
+            done < "$2"
+            [[ $seen_visible -eq 1 ]] || exit 1
+        ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output-$backend"
+        [ "$status" -eq 0 ] || { chmod 700 "$HOME/Downloads/denied"; echo "$backend: $output"; return 1; }
+    done
+    chmod 700 "$HOME/Downloads/denied"
+}
+
+@test "a traversal diagnostic other than a permission refusal still rejects the scan" {
+    touch "$HOME/Downloads/visible.dmg"
+    # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
+    mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/visible.dmg"; echo "[fd error]: $HOME/Downloads/disk: Input/output error (os error 5)" >&2; exit 0'
     run /bin/bash --noprofile --norc -c '
         export MOLE_TEST_MODE=1
         source "$1"
@@ -472,17 +498,6 @@ require_fd() {
         [[ $rc -eq $INSTALLER_EXIT_SCAN_FAILED && ! -s "$2" ]] || exit 1
         [[ "$INSTALLER_SCAN_FAILURE_PATH" == "$HOME/Downloads" ]] || exit 1
     ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/scan-output"
-    chmod 700 "$HOME/Downloads/denied"
-    [ "$status" -eq 0 ] || return 1
-    run /bin/bash --noprofile --norc -c '
-        export MOLE_TEST_MODE=1
-        source "$1"
-        scan_installers_in_path "$HOME/Downloads" > "$2"
-        while IFS= read -r -d "" file; do
-            [[ "$file" == "$HOME/Downloads/denied/hidden.dmg" ]] && exit 0
-        done < "$2"
-        exit 1
-    ' bash "$PROJECT_ROOT/bin/installer.sh" "$BATS_TEST_TMPDIR/recovered-scan"
     [ "$status" -eq 0 ]
 }
 

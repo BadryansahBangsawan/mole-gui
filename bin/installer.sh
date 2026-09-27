@@ -108,10 +108,26 @@ handle_candidate_file() {
             case "$zip_rc" in
                 0) printf '%s\0' "$file" ;;
                 1) return 0 ;;
-                *) return "$zip_rc" ;;
+                *)
+                    # One slow archive (an iCloud file that has to download
+                    # first, or a huge listing) is skipped like an unreadable
+                    # one. Only the shared deadline or a signal stops the scan.
+                    if mole_rc_timeout "$zip_rc" &&
+                        _mole_timeout_with_deadline 1 "${2:-}" > /dev/null; then
+                        return 0
+                    fi
+                    return "$zip_rc"
+                    ;;
             esac
             ;;
     esac
+}
+
+# True when every diagnostic line is a permission refusal: find's
+# "Permission denied" / "Operation not permitted" and fd's same text with an
+# "(os error N)" suffix. Anything else fails the scan.
+installer_scan_errors_are_permission_only() {
+    ! grep -E -v -e '(Permission denied|Operation not permitted)( \(os error [0-9]+\))?\.?$' -e '^$' "$1" > /dev/null
 }
 
 # Publish NUL-delimited candidates only on success; preserve producer failures.
@@ -147,10 +163,18 @@ scan_installers_in_path() {
             exec "$@" 2> "$errors_file"
         ' bash "$errors_file" "${scan_command[@]}" > "$scan_file" || scan_rc=$?
     fi
-    # fd reports traversal errors on stderr while still returning success.
-    # Treat any producer diagnostic as an incomplete inventory, without parsing it.
-    if [[ $scan_rc -eq 0 && -s "$errors_file" ]]; then
-        scan_rc=$INSTALLER_EXIT_SCAN_FAILED
+    # A folder the user cannot read (chmod 000, or privacy-protected without
+    # Full Disk Access) is out of reach, not a failed scan: its readable
+    # siblings still publish, and every removal is bound to its confirmed
+    # identity anyway. find exits 1 on it while fd still exits 0, so read the
+    # diagnostics; any other diagnostic, or any other status, keeps the whole
+    # inventory unpublished.
+    if [[ -s "$errors_file" ]] && [[ $scan_rc -eq 0 || $scan_rc -eq 1 ]]; then
+        if installer_scan_errors_are_permission_only "$errors_file"; then
+            scan_rc=0
+        else
+            scan_rc=$INSTALLER_EXIT_SCAN_FAILED
+        fi
     fi
     if [[ $scan_rc -eq 0 ]]; then
         while IFS= read -r -d '' file; do

@@ -384,7 +384,7 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-@test "stalled ZIP inspection discards all discovered installers and preserves timeout" {
+@test "one stalled ZIP inspection is skipped and the rest still publish" {
     touch "$HOME/Downloads/first.dmg" "$HOME/Downloads/stalled.zip"
     # shellcheck disable=SC2016 # Expanded by the fake command at execution time.
     mole_test_fake_command fd 'printf "%s\0" "$HOME/Downloads/first.dmg" "$HOME/Downloads/stalled.zip"'
@@ -396,8 +396,8 @@ EOF
         scan_all_installers() { scan_installers_in_path "$HOME/Downloads" "$1"; }
         rc=0
         collect_installers || rc=$?
-        mole_rc_timeout "$rc" || exit 1
-        [[ ${#INSTALLER_PATHS[@]} -eq 0 ]] || exit 1
+        [[ $rc -eq 0 ]] || { echo "rc=$rc"; exit 1; }
+        [[ ${#INSTALLER_PATHS[@]} -eq 1 && "${INSTALLER_PATHS[0]}" == "$HOME/Downloads/first.dmg" ]] || exit 1
         [[ -f "$HOME/Downloads/first.dmg" && -f "$HOME/Downloads/stalled.zip" ]] || exit 1
         [[ $SECONDS -lt 6 ]] || exit 1
     ' bash "$PROJECT_ROOT/bin/installer.sh"
