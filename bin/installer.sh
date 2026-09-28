@@ -1037,6 +1037,15 @@ main() {
             # Already handled by collect_installers
             ;;
         *)
+            # A timeout or signal in the delete phase stops before later
+            # selections, but it has already recorded which file it hit.
+            # Report that and what was removed instead of ending silently.
+            if [[ $total_delete_failed -gt 0 ]]; then
+                show_summary
+                if mole_rc_timeout "$exit_code"; then
+                    echo -e "${YELLOW}${ICON_WARNING}${NC} A file check timed out, so later selections were left in place. Retry mo installer."
+                fi
+            fi
             return "$exit_code"
             ;;
     esac
