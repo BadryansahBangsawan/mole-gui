@@ -1414,12 +1414,15 @@ _batch_scan_app_details() {
         elif [[ $live_sibling_rc -ge 128 ]]; then
             return "$live_sibling_rc"
         else
-            # This refusal ends the whole batch, so it must say so on the
-            # normal screen: the debug-only line left users with a silent
-            # exit and no way to report the cause (#1340).
-            log_error "Could not verify whether other installs share ${app_name}'s bundle id; nothing was removed"
-            debug_log "Could not complete the live same-bundle scan for $app_name"
-            return 1
+            # The scan could not run at all (restricted receipts, an
+            # unreadable app root, a receipt path without Info.plist). That
+            # proves nothing either way, and the narrowed plan is safe
+            # whether or not a sibling exists: it removes only the selected,
+            # identity-bound bundle. Refusing here blocked every uninstall
+            # on managed Macs (#1624).
+            live_sibling_present=true
+            log_warning "$(printf "%s: could not check for other copies, so shared leftovers are left in place" "$app_name")"
+            debug_log "Could not complete the live same-bundle scan for $app_name (exit $live_sibling_rc)"
         fi
         local preview_live_sibling_fingerprint="$_MOLE_UNINSTALL_LIVE_SIBLING_FINGERPRINT"
 
@@ -1940,11 +1943,12 @@ _batch_execute_removals() {
                     reason="the app installation set changed after preview"
                     suggestion="Select the app again and review the new removal plan"
                 fi
-            elif [[ $live_sibling_rc -eq $MOLE_UNINSTALL_SCAN_PARTIAL &&
+            elif [[ $live_sibling_rc -lt 128 &&
                 "$sibling_guard" == "guard_login" &&
                 -z "$encoded_files" ]]; then
                 # The preview already narrowed this plan to the selected app
-                # bundle alone because the scan could not prove absence. The
+                # bundle alone because the scan could not prove absence, or
+                # could not run at all (#1624). The
                 # re-check hitting the same doubt confirms that state rather
                 # than contradicting it, and a plan with no shared teardown
                 # has nothing a live sibling could lose. Refusing here is what

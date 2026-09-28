@@ -733,11 +733,12 @@ EOF
 	# surviving-sibling name-collision path sets it while keeping
 	# name-keyed leftovers in encoded_files. If the partial re-check
 	# acceptance ever drops the empty-deletion-list gate, a sibling
-	# hidden behind the unreadable part of a partial re-scan could lose
+	# hidden behind the unreadable part of a partial or failed re-scan
+	# (#1624) could lose
 	# name-keyed data without the fingerprint defense.
 	local window
 	# shellcheck disable=SC2016 # the \$ patterns are literal source text
-	window=$(command grep -A2 'live_sibling_rc -eq \$MOLE_UNINSTALL_SCAN_PARTIAL &&' \
+	window=$(command grep -A2 'live_sibling_rc -lt 128 &&' \
 		"$PROJECT_ROOT/lib/uninstall/batch.sh")
 	# Positive control: the acceptance branch must exist at all.
 	printf '%s\n' "$window" | command grep -q 'guard_login' || {
