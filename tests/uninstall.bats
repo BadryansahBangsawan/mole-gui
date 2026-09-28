@@ -428,6 +428,165 @@ EOF
     [[ "$output" != *"cannot be removed safely by Mole"* ]]
 }
 
+@test "batch uninstall continues when best-effort teardown steps time out" {
+    mkdir -p "$HOME/Applications/SlowTeardown.app"
+    local trace="$HOME/slow-teardown.log"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+brew() { :; }
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+pgrep() { return 1; }
+find_app_files() { return 0; }
+find_app_system_files() { return 0; }
+ensure_sudo_session() { echo "UNEXPECTED_SUDO"; return 1; }
+# osascript waiting on the System Events automation prompt, a slow lsregister,
+# and a hung launchctl all surface here as the timeout status.
+stop_launch_services() { return 124; }
+unregister_app_bundle() { return 124; }
+remove_login_item() { return 124; }
+bootout_login_item_helpers() { return 124; }
+force_kill_app() { return 0; }
+mole_delete() {
+	printf 'DELETE:%s\n' "$1" >> "$HOME/slow-teardown.log"
+	return 0
+}
+
+selected_apps=("0|$HOME/Applications/SlowTeardown.app|SlowTeardown|com.example.SlowTeardown|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+
+printf '\n' | batch_uninstall_applications
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$(grep -c "^DELETE:$HOME/Applications/SlowTeardown.app$" "$trace" 2> /dev/null || true)" -eq 1 ]] || return 1
+    [[ "$output" != *"UNEXPECTED_SUDO"* ]]
+}
+
+@test "batch uninstall still stops on a signal during teardown before deleting" {
+    mkdir -p "$HOME/Applications/SignalTeardown.app"
+    local trace="$HOME/signal-teardown.log"
+
+    local step
+    for step in stop_launch_services remove_login_item; do
+        rm -f "$trace"
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" SIGNAL_STEP="$step" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+brew() { :; }
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+pgrep() { return 1; }
+find_app_files() { return 0; }
+find_app_system_files() { return 0; }
+ensure_sudo_session() { return 1; }
+stop_launch_services() { :; }
+unregister_app_bundle() { :; }
+remove_login_item() { :; }
+eval "${SIGNAL_STEP}() { return 130; }"
+force_kill_app() { return 0; }
+mole_delete() {
+	printf 'DELETE:%s\n' "$1" >> "$HOME/signal-teardown.log"
+	return 0
+}
+
+selected_apps=("0|$HOME/Applications/SignalTeardown.app|SignalTeardown|com.example.SignalTeardown|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+
+batch_rc=0
+printf '\n' | batch_uninstall_applications > /dev/null 2>&1 || batch_rc=$?
+echo "BATCH_RC=$batch_rc"
+EOF
+
+        [ "$status" -eq 0 ] || {
+            echo "$step: $output"
+            return 1
+        }
+        [[ "$output" == *"BATCH_RC=130"* ]] || {
+            echo "$step: $output"
+            return 1
+        }
+        [[ ! -e "$trace" ]] || return 1
+    done
+}
+
+@test "stop_launch_services tries every root after one times out" {
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+_uninstall_unload_launch_plists() {
+	printf 'ROOT:%s:%s\n' "$1" "${4:-}" >> "$HOME/unload-roots.log"
+	return 124
+}
+
+rc=0
+stop_launch_services "com.example.SlowAgent" false "$HOME/Applications/SlowAgent.app" || rc=$?
+echo "RC=$rc"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"RC=124"* ]] || return 1
+    [[ "$(grep -c '^ROOT:' "$HOME/unload-roots.log" 2> /dev/null || true)" -eq 2 ]]
+}
+
+@test "batch uninstall names the app and step when a removal times out" {
+    mkdir -p "$HOME/Applications/SlowDelete.app"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+brew() { :; }
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+pgrep() { return 1; }
+find_app_files() { return 0; }
+find_app_system_files() { return 0; }
+ensure_sudo_session() { return 1; }
+stop_launch_services() { :; }
+unregister_app_bundle() { :; }
+remove_login_item() { :; }
+force_kill_app() { return 0; }
+mole_delete() { return 124; }
+
+selected_apps=("0|$HOME/Applications/SlowDelete.app|SlowDelete|com.example.SlowDelete|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+
+batch_rc=0
+printf '\n' | batch_uninstall_applications 2>&1 || batch_rc=$?
+echo "BATCH_RC=$batch_rc"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"BATCH_RC=1"* ]] || return 1
+    [[ "$output" == *"Uninstall stopped at SlowDelete: app removal timed out"* ]]
+}
+
 @test "batch uninstall rejects privileged permanent removal below a mutable parent before side effects (#1299)" {
     mkdir -p "$HOME/Applications/RootOwned.app"
     mkdir -p "$HOME/Library/Application Support/RootOwned"
