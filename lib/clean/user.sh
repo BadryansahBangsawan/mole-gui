@@ -2841,9 +2841,10 @@ check_large_file_candidates() {
     _report_large_or_stop "pnpm store" "$HOME/Library/pnpm/store" || return $?
     _report_large_or_stop "Conda packages" "$HOME/.conda/pkgs" || return $?
     _report_large_or_stop "Anaconda packages" "$HOME/anaconda3/pkgs" || return $?
-    # ~/.gradle/caches minus the build-cache/daemon slices clean_dev_jvm
-    # already resets: modules-2 is the dependency store builds resolve from,
-    # so it is surfaced for review like ~/.m2 rather than deleted.
+    # ~/.gradle/caches holds modules-2, the dependency store builds resolve
+    # from, so it is surfaced for review like ~/.m2 rather than deleted. The
+    # row measures the whole folder, including the build-cache slices that
+    # clean_dev_jvm resets.
     _report_large_or_stop "Gradle caches" "$HOME/.gradle/caches" || return $?
 
     # Emulator images, SDK system images, downloaded models, and installed
