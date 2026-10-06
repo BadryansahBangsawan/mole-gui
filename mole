@@ -86,7 +86,22 @@ mole_dispatch_history_early() {
     exec "$SCRIPT_DIR/bin/history.sh"
 }
 
+# Hidden GUI contract. Keep it off MOLE_COMMANDS, --help, and completions.
+mole_dispatch_protocol_early() {
+    [[ "${MOLE_TEST_MODE:-0}" == "1" && "${MOLE_SKIP_MAIN:-0}" == "1" ]] && return 0
+
+    mole_collect_cli_args "$@"
+    [[ "${MOLE_CLI_ARGS[0]:-}" == "protocol" ]] || return 0
+
+    [[ "$MOLE_CLI_DEBUG" == "true" ]] && export MO_DEBUG=1
+    if [[ "${#MOLE_CLI_ARGS[@]}" -gt 1 ]]; then
+        exec "$SCRIPT_DIR/bin/protocol.sh" "${MOLE_CLI_ARGS[@]:1}"
+    fi
+    exec "$SCRIPT_DIR/bin/protocol.sh"
+}
+
 mole_dispatch_history_early "$@"
+mole_dispatch_protocol_early "$@"
 
 source "$SCRIPT_DIR/lib/core/common.sh"
 source "$SCRIPT_DIR/lib/core/commands.sh"

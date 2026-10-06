@@ -2197,9 +2197,25 @@ safe_sudo_remove() {
 # Failure never falls back to a path-only identity.
 mole_deletion_identity() {
     local path="$1"
-    local duration identity
+    local duration identity identity_rc=0
     duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_QUICK_DETECT_SEC" "${2:-}") || return $?
-    identity=$(run_with_timeout "$duration" "$STAT_BSD" -f%d:%i:%m "$path" < /dev/null 2> /dev/null) || return $?
+    identity=$(run_with_timeout "$duration" "$STAT_BSD" -f%d:%i:%m "$path" < /dev/null 2> /dev/null) || identity_rc=$?
+    if mole_rc_timeout_or_signal "$identity_rc"; then
+        return "$identity_rc"
+    fi
+    if [[ "$identity" =~ ^[0-9]+:[0-9]+:-?[0-9]+$ ]]; then
+        printf '%s\n' "$identity"
+        return 0
+    fi
+
+    # GNU stat (Linux CI / protocol tests). This is still a device+inode+mtime
+    # contract, not a path-only fallback.
+    identity_rc=0
+    duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_QUICK_DETECT_SEC" "${2:-}") || return $?
+    identity=$(run_with_timeout "$duration" stat -c '%d:%i:%Y' "$path" < /dev/null 2> /dev/null) || identity_rc=$?
+    if mole_rc_timeout_or_signal "$identity_rc"; then
+        return "$identity_rc"
+    fi
     [[ "$identity" =~ ^[0-9]+:[0-9]+:-?[0-9]+$ ]] || return 1
     printf '%s\n' "$identity"
 }
@@ -2961,11 +2977,18 @@ _mole_snapshot_path_identity() {
     local parent_id=""
     local target_id=""
     local identities=""
-    identities=$("$STAT_BSD" -f '%d:%i' "$physical_parent" "$path" 2> /dev/null) || return 1
-    [[ "$identities" == *$'\n'* ]] || return 1
+    identities=$("$STAT_BSD" -f '%d:%i' "$physical_parent" "$path" 2> /dev/null) || identities=""
     parent_id="${identities%%$'\n'*}"
     target_id="${identities#*$'\n'}"
-    [[ "$parent_id" =~ ^[0-9]+:[0-9]+$ && "$target_id" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    if [[ "$identities" != *$'\n'* || ! "$parent_id" =~ ^[0-9]+:[0-9]+$ || ! "$target_id" =~ ^[0-9]+:[0-9]+$ ]]; then
+        # Incomplete BSD output fail-closes. GNU format is only for hosts
+        # where BSD flags are unsupported (empty result), still device+inode.
+        [[ -z "$identities" ]] || return 1
+        identities=$(stat -c '%d:%i' "$physical_parent" "$path" 2> /dev/null) || return 1
+        parent_id="${identities%%$'\n'*}"
+        target_id="${identities#*$'\n'}"
+        [[ "$identities" == *$'\n'* && "$parent_id" =~ ^[0-9]+:[0-9]+$ && "$target_id" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    fi
 
     _MOLE_PATH_SNAPSHOT_PARENT="$physical_parent"
     _MOLE_PATH_SNAPSHOT_PARENT_ID="$parent_id"

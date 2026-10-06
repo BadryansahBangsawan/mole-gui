@@ -200,7 +200,7 @@ EOF
 	local cmd out err
 	for cmd in "update --bogus" "remove --bogus" "optimize --bogus" \
 		"purge --bogus" "installer --bogus" "uninstall --bogus" \
-		"uninstall --whitelist" "history --bogus"; do
+		"uninstall --whitelist" "history --bogus" "protocol --bogus"; do
 		out="$BATS_TEST_TMPDIR/opt.out"
 		err="$BATS_TEST_TMPDIR/opt.err"
 		run env HOME="$HOME" bash -c "'$PROJECT_ROOT/mole' $cmd > '$out' 2> '$err'"
@@ -215,6 +215,13 @@ EOF
 	[ "$status" -eq 0 ]
 	[[ "$output" != *"mo check"* ]]
 }
+
+@test "mole --help does not list protocol command" {
+	run env HOME="$HOME" "$PROJECT_ROOT/mole" --help
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"mo protocol"* ]]
+}
+
 
 @test "mole --help documents history command" {
 	run env HOME="$HOME" "$PROJECT_ROOT/mole" --help

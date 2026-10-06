@@ -74,6 +74,12 @@ bin/status-go
 bin/analyze-darwin-*
 bin/status-darwin-*
 
+# macOS companion GUI (local build products)
+apps/macos/.build/
+apps/macos/DerivedData/
+xcuserdata/
+*.xcuserstate
+
 # Test artifacts
 tests/tmp-*/
 tests/*.tmp
