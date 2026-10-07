@@ -78,6 +78,11 @@ bin/status-darwin-*
 apps/macos/.build/
 apps/macos/DerivedData/
 xcuserdata/
+
+# Windows companion GUI (local build products)
+apps/windows/**/bin/
+apps/windows/**/obj/
+apps/windows/.vs/
 *.xcuserstate
 
 # Test artifacts

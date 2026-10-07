@@ -12,9 +12,9 @@ Never parse TUI/ANSI. Never spawn raw `mo clean`, `mo installer`, `mo purge`, or
 
 ## Status
 
-Phase 0 scaffold: design tokens, app shell, Overview placeholder, and an engine client that documents the protocol spawn. Pencil screenshots live in `docs/gui/screenshots/`. A real `xcodebuild` needs a Mac. This host may be Linux.
+All sidebar destinations, First Run, Status Detail, and shared confirmation sheets now have SwiftUI counterparts matching Pencil copy. Pages use kit fixtures until family scans exist on `mo protocol`. Review/Confirm callbacks present sheets but do not execute; Disk Explorer Move to Trash stays disabled. A real `xcodebuild` / `swift build` needs a Mac. This host may be Linux.
 
-Default window: 1220×780. Minimum: 1080×700. Sidebar width: 232.
+Default window: 1220×780. Minimum: 1080×700. Sidebar width: 232. Hidden title bar; traffic-light slot is the 52pt sidebar row.
 
 Fonts: SF Pro + SF Mono (Pencil mocks use Inter + IBM Plex Mono).
 
@@ -25,7 +25,7 @@ swift build --package-path apps/macos
 # or open an Xcode wrapper when added
 ```
 
-Do not fold this into default `make build`. CI macos-14/15 bats jobs do not build Go helpers; keep GUI out of that path.
+Do not fold this into default `make build`. CI macos-14/15 bats jobs do not build Go helpers; keep GUI out of that path. Minimum: macOS 14.
 
 ## Recovery contract
 
